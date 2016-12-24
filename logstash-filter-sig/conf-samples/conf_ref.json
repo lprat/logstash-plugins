@@ -1,0 +1,3 @@
+{"rules":[ 
+  {"pivot_field":{"tags":["squid"]}, "list_sig": ["src_host","src_ip","dst_host","dst_ip","uri_proto","uri_global"], "relation_min": 10, "simhash_size": 32, "simhash_use_size": 32, "id": 2001} 
+]}

@@ -1,0 +1,9 @@
+{
+"ioc_hostname":["_host"], "ioc_hostname_downcase":true, "ioc_hostname_iocnote":2, "ioc_hostname_iocid":1001,
+"ioc_domain":["_domain"], "ioc_domain_downcase":true, "ioc_domain_iocnote":2, "ioc_domain_iocid":1002,
+"ioc_ip":["_ip"], "ioc_ip_downcase":false, "ioc_ip_iocnote":1, "ioc_ip_iocid":1003,
+"ioc_emailaddr":["_emailaddr"], "ioc_emailaddr_downcase":true, "ioc_emailaddr_iocnote":3, "ioc_emailaddr_iocid":1004,
+"ioc_user-agent":["user_agent"], "ioc_user-agent_downcase":false, "ioc_user-agent_iocnote":2, "ioc_user-agent_iocid":1005,
+"ioc_uri":["_url","_request","_uripath_global"], "ioc_uri_downcase":false, "ioc_uri_iocnote":2, "ioc_uri_iocid":1006,
+"ioc_attachment":["attachment","_uriparam","_uripage"], "ioc_attachment_downcase":false, "ioc_attachment_iocnote":1, "ioc_attachment_iocid":1007
+}

@@ -1,0 +1,1 @@
+{"squid": {"fields": ["src_ip","dst_host","dst_ip","uri_proto","tags"], "delay": 3600, "hashbit": 32}}

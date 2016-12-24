@@ -1,0 +1,13 @@
+{
+"ioc_ip":["(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|10\\.\\d+\\.\\d+\\.\\d+|192\\.168\\.\\d+\\.\\d+|172\\.([1-2][0-9]|0|30|31)\\.\\d+\\.\\d+|255\\.255\\.255\\.\\d+)"], 
+"email-attachment":[],
+"ioc_attachment":["2"],
+"ioc_emailaddr":[],
+"ioc_uri":["\/"],
+"ioc_domain":[],
+"ioc_hostname":[],
+"ioc_user-agent":[],
+"ioc_email-subject":[],
+"ioc_as":[]
+}
+

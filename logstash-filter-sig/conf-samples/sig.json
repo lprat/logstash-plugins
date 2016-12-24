@@ -1,0 +1,6 @@
+{"rules":[
+	{"type":{"motif":["squid"],"type":1,"note":1,"name":"Field User-AGENT not present","id":1},"user_agent":{"false":{}}},
+        {"new_value_dst_host":{"sizeope":{"sup":1},"type":1,"note":1,"name":"New value dst_host","id":2},"type":{"motif":["squid"]}},
+	{"elapsed_time":{"numope":{"sup":900000},"type":1,"note":2,"name":"Connection time too long > 15minutes","id":3}},
+	{"type":{"motif":["squid"],"type":2,"note":2,"name":"Referer FIELD not present","id":4},"uri_proto":{"notregexp":["tunnel"]},"referer_host":{"false":{}}}
+]}
