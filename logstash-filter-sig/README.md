@@ -36,7 +36,8 @@ Logstash plugin Filter "Sig" can help you to detect security threat in log by di
 
 This plugin use simhash for find around result and futur possibility check and correlation.
 
-** !!!! You must install simhash under logstash, follow instruction: ** 
+**!!!! You must install simhash under logstash, follow instruction:** 
+
 1. curl -sSL https://get.rvm.io | bash && /usr/local/rvm/bin/rvm install 1.9.3-dev
 2. IN vendor/jruby/lib/ruby/shared/mkmf.rb add line (45):
   * RbConfig::MAKEFILE_CONFIG["CPPFLAGS"] += ' -I/usr/local/rvm/rubies/ruby-1.9.3-p551-dev/include/ruby-1.9.1/x86_64-linux/'

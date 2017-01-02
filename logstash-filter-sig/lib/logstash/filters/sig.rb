@@ -285,6 +285,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @load_statut_ref = true
     @load_statut_drop = true
     @load_statut_freqrules = true
+    @load_statut_note = true
     ###
     @logger.info("finish")
     #next refresh file
@@ -406,13 +407,15 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       detected_ioc = Array.new
       detected_ioc_count = 0
       detected_ioc_name = Array.new
+      detected_ioc_id = Array.new
+      detected_ioc_note = 0
       #verify ioc by rules
       @ioc_rules.each do |rkey,rval|
         if rval.is_a?(Array) and not rkey =~ /_downcase$|_iocnote$|_iocid$/ and @ioc_db[rkey.to_s]
           list_search = []
           #create list value by rule to check ioc
           for elemvalue in rval
-            #Collect value of filed name contains "elemvalue"
+            #Collect value of field name contains "elemvalue"
             hash_tmp = event.to_hash.select{|k,v| (k.to_s).include? elemvalue }
             if hash_tmp.values.any?
             #hash not empty
@@ -427,10 +430,10 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
               else
                 if @ioc_rules[rkey+'_downcase'] 
                   #case compare by downcase
-                  list_search = hash_search + hash_tmp.values.map!(&:downcase)
+                  list_search = list_search + hash_tmp.values.map!(&:downcase)
                 else
                   #case normaly compare
-                  list_search = hash_search + hash_tmp.values
+                  list_search = list_search + hash_tmp.values
                 end
               end
             end
@@ -454,7 +457,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
         if detected_ioc.any?
           #ioc find, add information in event (count, name, id, note)
           unless event.get(@target_ioc).nil?
-            event.set(@target_ioc, event.get(@target) + detected_ioc)
+            event.set(@target_ioc, event.get(@target_ioc) + detected_ioc)
           else
             event.set(@target_ioc, detected_ioc)
           end
@@ -527,7 +530,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
             validfield=0
             #length of field check contains in rule
             countfield=@sig_db_array[i].length
-            sig_add = {"Rules" => "Detected rule #{i}"}
+            sig_add = {"Rules" => "Detected rule at emplacement: #{i} (not id)"}
             sig_add["note"] = 0
             #check rule field by field in event
             for kfield in @sig_db_array[i]
@@ -931,20 +934,20 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
               #check SIG RESULT FIND and get information name, type, modefp, note, id
               if check_sig == true
                 validfield = validfield + 1
-                unless @sig_db['rules'][i][kfield]['id'].is_a?(Numeric)
+                if @sig_db['rules'][i][kfield]['id'].is_a?(Numeric)
                   sig_add["id"] = @sig_db['rules'][i][kfield]['id'].to_i
                 else
                   #all information must to be on same field
                   next
                 end
-                unless @sig_db['rules'][i][kfield]['name'].is_a?(String)
+                if @sig_db['rules'][i][kfield]['name'].is_a?(String)
                   if sig_add["name_sig"].nil?
                     sig_add["name_sig"] = @sig_db['rules'][i][kfield]['name']
                   else
                     sig_add["name_sig"] = sig_add["name_sig"] + @sig_db['rules'][i][kfield]['name']
                   end
                 end
-                unless @sig_db['rules'][i][kfield]['type'].is_a?(Numeric)
+                if @sig_db['rules'][i][kfield]['type'].is_a?(Numeric)
                   if @sig_db['rules'][i][kfield]['type'] == 2
                     type_sig = type_sig + 1
                   end
@@ -952,25 +955,25 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                     type_obl = type_obl + 1
                   end
                 end
-                unless @sig_db['rules'][i][kfield]['modeFP'].nil?
+                if @sig_db['rules'][i][kfield]['modeFP'].nil?
                   if @sig_db['rules'][i][kfield]['modeFP'] == true
                     sig_add["modeFP"] = true
                   end
                 end
-                unless @sig_db['rules'][i][kfield]['note'].is_a?(Numeric)
+                if @sig_db['rules'][i][kfield]['note'].is_a?(Numeric)
                   if sig_add["note"].nil?
                     sig_add["note"] = @sig_db['rules'][i][kfield]['note'].to_s
                   else
-                    sig_add["note"] = (sig_add["note"].to_i + @sig_db['rules'][i][kfield]['note']).to_s
+                    sig_add["note"] = (sig_add["note"].to_i + @sig_db['rules'][i][kfield]['note'].to_i).to_s
                   end
                 end
-                unless @sig_db['rules'][i][kfield]['extract'].is_a?(Hash)
+                if @sig_db['rules'][i][kfield]['extract'].is_a?(Hash)
                   sig_add["extract"] = @sig_db['rules'][i][kfield]['extract']
                 end
                 #"freq_field:" [field,field,field,field],"freq_delay":60s,freq_count: 3, freq_resettime: 3600s, correlate_change_fieldvalue: []
                 #use for correlate multi event type with correlate_change_fieldvalue
                 # or use for freq select, by exemple brute force without correlate_change_fieldvalue
-                unless @sig_db['rules'][i][kfield]['freq_field'].is_a?(Array) and @sig_db['rules'][i][kfield]['freq_delay'].is_a?(Interger) and @sig_db['rules'][i][kfield]['freq_resettime'].is_a?(Integer) and @sig_db['rules'][i][kfield]['freq_count'].is_a?(Integer)
+                if @sig_db['rules'][i][kfield]['freq_field'].is_a?(Array) and @sig_db['rules'][i][kfield]['freq_delay'].is_a?(Interger) and @sig_db['rules'][i][kfield]['freq_resettime'].is_a?(Integer) and @sig_db['rules'][i][kfield]['freq_count'].is_a?(Integer)
                   sig_add["freq_field"] = @sig_db['rules'][i][kfield]['freq_field']
                   sig_add["freq_delay"] = @sig_db['rules'][i][kfield]['freq_delay']
                   sig_add["freq_count"] = @sig_db['rules'][i][kfield]['freq_count']
@@ -1054,6 +1057,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                         #valid sig
                         @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_resettime"]
                         @sig_db_freq[hash_field]['valid'] = true
+                        detected_sig_id_corre.clear
                       end
                     end
                   else
@@ -1146,7 +1150,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       if detected_sig.any? and type_sig < detected_sig_count and type_obl > 0
         #verify if not juste correlate rule match
         if detected_sig_id != detected_sig_id_corre
-          unless event.get(@target).nil?
+          unless event.get(@target_sig).nil?
             event.set(@target_sig, event.get(@target_sig) + detected_sig) 
           else
             event.set(@target_sig, detected_sig)
@@ -1428,8 +1432,8 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     
     ######## NOTE ########
     #check refresh db note
-    unless event.get(@targetid).nil? and @disable_note
-      if @next_refresh_note < tnow or 
+    if not event.get(@targetid).nil? and not @disable_note
+      if @next_refresh_note < tnow
         if @load_statut_note == true
           @load_statut_note = false
           load_conf_rules_note
@@ -1503,7 +1507,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
           @load_statut_fp = true
         end
       end
-      sleep(1) until @load_statut_conffp
+      sleep(1) until @load_statut_fp
     end
     #chekc if db &conf are not empty + select_fp exist
     if not @fp_rules.empty? and not @fp_db.empty? and not event.get(@select_fp).nil? and not @disable_fp
@@ -1831,7 +1835,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
           @sig_db['rules'][i].each do |nkey,nval|
             if nval['type'].is_a?(Numeric)
               if nval['type'] == 2
-                puts 'find at'+i.to_s+' -> '+j.to_s+' -- '+tmp[i-j].to_s
+                #puts 'find at'+i.to_s+' -> '+j.to_s+' -- '+tmp[i-j].to_s
                 tmp=tmp.insert(-1,tmp.delete_at(i-j))
                 j=j+1
                 break
@@ -1840,6 +1844,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
           end
         end
         #create Field True & false
+        @sig_db['rules'] = *tmp
         for rule in tmp
           keyF.clear
           keyT.clear
