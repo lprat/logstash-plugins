@@ -1,12 +1,12 @@
 <%=
 if incident[@subject_field] =~ /New at/
-  tmp = incident["subject"].gsub(/New at \S+/, "Update at " + tnow.strftime("%Y-%m-%dT%H:%M").to_s + " - 2 alerts")
+  tmp = incident[@subject_field].gsub(/New at \S+/, "Update at " + tnow.strftime("%Y-%m-%dT%H:%M").to_s + " - 2 alerts")
 else
-  tmp = incident["subject"].gsub(/Update at \S+/, "Update at " + tnow.strftime("%Y-%m-%dT%H:%M").to_s)
-  num_al=incident["subject"].scan(/- \d+ alerts/).last
+  tmp = incident[@subject_field].gsub(/Update at \S+/, "Update at " + tnow.strftime("%Y-%m-%dT%H:%M").to_s)
+  num_al=incident[@subject_field].scan(/- \d+ alerts/).last
   if num_al
     num_al = num_al.scan(/\d+/).first.to_i + 1
-    tmp = body["subject"].gsub(/- \d+ alerts/, "- " + num_al.to_s + " alerts")
+    tmp = incident[@subject_field].gsub(/- \d+ alerts/, "- " + num_al.to_s + " alerts")
   end
 end
 tmp

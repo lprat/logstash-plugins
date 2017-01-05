@@ -92,6 +92,10 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
       @logger.error("FIR templates not found!")
       exit -1
     end
+    if @template_subj_u.empty? or @template_subj_n.empty? or @template_data_u.empty? or @template_data_n.empty?
+      @logger.error("FIR templates is empty!!")
+      exit -1
+    end
     @logger.info("finish")
     @next_refresh = Time.now + @refresh_interval
     @load_statut_r = false
@@ -236,7 +240,7 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
                 if not rule['template_up_sujet'].nil? and not rule['template_up_sujet'].empty?
                   incident[@subject_field] = ERB.new(rule['template_up_sujet']).result(binding)
                 else
-                 incident[@subject_field] = ERB.new(@template_subj_u).result(binding)
+                  incident[@subject_field] = ERB.new(@template_subj_u).result(binding)
                 end
                 #keep old content
                 if not rule['template_up_body'].nil? and not rule['template_up_body'].empty?
