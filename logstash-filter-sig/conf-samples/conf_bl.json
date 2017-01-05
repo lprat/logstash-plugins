@@ -1,0 +1,5 @@
+{
+"src_ip":{"dbs":["firehol_webserver.netset"],"id":"18001","note": 2,"category":"webserver attack"},
+"dst_ip":{"dbs":["firehol_webclient.netset"],"id":"18002","note":2,"category":"malware"}
+}
+

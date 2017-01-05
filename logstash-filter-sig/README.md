@@ -2,8 +2,9 @@
 
 Logstash plugin Filter "Sig" can help you to detect security threat in log by differents techniques:
 * Drop False positive and noise
-* IOC extracted of MISP by exemple
 * Find new value in field
+* BL REPUTATION check
+* IOC extracted of MISP by exemple
 * SIG with some fonctionnality search
   * Each rule have:
     * a name: name of rule for report
@@ -98,6 +99,14 @@ RUN /usr/share/logstash/bin/logstash-plugin install logstash-filter-sig-3.0.0.ge
   * refresh_interval_confnv => 3600 : delay interval (in second) to refresh conf_nv
   * save_interval_dbnv => 3600 : delay interval (in second) to save db_nv 
   * target_nv => "new_value_" : prefix value if new value detected, create field with name "new_value_FIELDX" contains "new value" value
+  
+* BL REPUTATION : use for check ip reputation in event field
+  * conf_bl => "/etc/logstash/db/bl_conf.json" : path of file bl_conf.json (see below for more information)
+  * file_bl => [Array type] ["/etc/logstash/db/firehol_level1.netset","/etc/logstash/db/firehol_level2.netset","/etc/logstash/db/firehol_level3.netset","/etc/logstash/db/firehol_level4.netset","/etc/logstash/db/firehol_webserver.netset","/etc/logstash/db/firehol_webclient.netset","/etc/logstash/db/firehol_abusers_30d.netset","/etc/logstash/db/firehol_anonymous.netset","/etc/logstash/db/firehol_proxies.netset"] : path of files contains ip reputation
+    * You can use firehol BL: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webserver.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webclient.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_anonymous.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_proxies.netset
+  * noapply_sig_bl => "sig_no_apply_bl" : add in event a field name "sig_no_apply_bl" for no use this check on it
+  * refresh_interval_confbl => 3600 : delay interval (in second) to refresh conf_bl & db_bl (file bl)
+  * targetname_bl => "bl_detected_category" : field name to save value of category if ip reputation found
 
 * IOC : use for check IOC in event
   * db_ioc => ["/etc/logstash/db/ioc.json", "/etc/logstash/db/ioc_local.json"] : Array contains path of files db (ioc_local.json => created by signature function [file_save_localioc], ioc.json) (see below for more information)
@@ -173,6 +182,18 @@ The file contains rules which indicates what field selected for check new value.
 {"rules": ["dst_host","user_agent"]}
 ```
 Above, the rules selectes field with name "dst_host" for create verification on it, and another verification on field "user_agent".
+
+### IP REPUTATION
+#### bl_conf.json
+The file contains rules which indicates what field selected for check with list ip reputation. Field must be a IP format.
+** This file is a Json format **
+```
+{"fieldx": {'dbs':[file_name,file_name2,...], id: '180XX', 'note': 1, 'category': "malware"}}
+```
+Use id plage different of another technique (ioc, sig, ref, ...).
+Note: between 1 and 4.
+Category: indicate category contains in file_name (malware, webserveur attack, proxies, ...)
+dbs: must contains list file name configured in main conf 'file_bl'
 
 ### IOC
 #### ioc_conf.json

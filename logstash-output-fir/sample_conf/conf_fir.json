@@ -1,0 +1,17 @@
+{ "rules": [
+  {
+   "filters": {"sig_detected_note": "3|4"},
+    "subject_filter": "src_ip",
+    "subject_filter_prefix": "-",
+    "subject_filter_sufix": "-", 
+    "body_filter": "fingerprint",
+    "body_filter_prefix": "",
+    "body_filter_sufix": " -> SCORE",
+    "severity_add": "sig_detected_note", 
+    "fields_create": {"actor": 6, "category": 26,"confidentiality": 0,"detection": 36, "plan": 37,"is_starred": false,"is_major": false,"is_incident": false,"concerned_business_lines": []},
+    "template_new_sujet": "", 
+    "template_new_body": "", 
+    "template_up_sujet": "",
+    "template_up_body": "",
+  }
+] }

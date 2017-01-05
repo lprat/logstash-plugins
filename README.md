@@ -37,7 +37,6 @@ Logstash plugin Filter "Sig" can help you to detect security threat in log by di
 
 ## logstash-output-fir
 Logstash plugin Output for send alert (created by filter sig) in FIR (Cert SG - https://github.com/certsocietegenerale/FIR) 
-Wait because i must remake template for write MD format because old time format was HTML.
 
 ## Contact
 

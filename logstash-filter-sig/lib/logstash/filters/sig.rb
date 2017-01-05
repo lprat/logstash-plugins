@@ -30,7 +30,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   milestone 1
   ############PLUGIN LOGSTASH SIG -- lionel.prat9@gmail.com #############
   ############MULTI FUNCTIONNALITY IN ORDER CALL########################
-  ###### DROP_FIRST[FIELD(regexp_list)]->NEW_VALUE[time/notime]->SIG[FIELD_IOC(misp_extract),RULES(list),FALSE_POSITIVE(drop),ANOMALIE(db_reference),DROP_END[SIMHASH(match_list)],FREQ(db_frequence -> create new event if alert) ########
+  ###### DROP_FIRST[FIELD(regexp_list)]->NEW_VALUE[time/notime]->BL->SIG[FIELD_IOC(misp_extract),RULES(list),FALSE_POSITIVE(drop),ANOMALIE(db_reference),DROP_END[SIMHASH(match_list)],FREQ(db_frequence -> create new event if alert) ########
   ###### SIG add special_tag if match #######
   ############### CONFIG DROP SIMPLE FIRST & FINGERPRINT SIMHASH ###################
   ## DESCRIPTION: use for drop noise without risk with very simple rule, if nothing detected then create fingerprint simhash, thus check if fingerprint content in db fingerprint false positive to drop.
@@ -42,6 +42,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   config :disable_drop, :validate => :boolean, :default => false
   config :disable_fp, :validate => :boolean, :default => false
   config :disable_nv, :validate => :boolean, :default => false
+  config :disable_bl, :validate => :boolean, :default => false
   config :disable_ioc, :validate => :boolean, :default => false
   config :disable_sig, :validate => :boolean, :default => false
   config :disable_ref, :validate => :boolean, :default => false
@@ -55,16 +56,16 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   
   #CONF FINGERPRINT - format: json {"type": {fields: [a,b,c], delay: 3600, hashbit: 16},}
   # create simhash (on hashbit) with fields [a,b,c] for delay 3600 . The delay is used for tag first alert or complementary information. Use delay by exemple if you use dhcp and ip in fingerprint...
-  config :conf_fp, :validate => :string, :default => "/etc/logstash/db/fingerprint_conf.json"
+  config :conf_fp, :validate => :path, :default => "/etc/logstash/db/fingerprint_conf.json"
   
   #DROP RULES DB - format: json {"field": "regexp"} - don't use same field name more time
-  config :db_drop, :validate => :string, :default => "/etc/logstash/db/drop-db.json"
+  config :db_drop, :validate => :path, :default => "/etc/logstash/db/drop-db.json"
   #DROP FINGERPRINT DB - format: json {"fingerprint": "raison of fp"}
-  config :db_dropfp, :validate => :string, :default => "/etc/logstash/db/drop-fp.json"
+  config :db_dropfp, :validate => :path, :default => "/etc/logstash/db/drop-fp.json"
   
-  #Name of field for select rules fp - exemple event['tags']="squid" -- in fp_conf.sig: #{"squid":{"fields":["src_ip","dst_host","dst_ip","uri_proto","sig_detected_name","ioc_detected","tags"],"hashbit":8,"delay":3600}}
+  #Name of field for select rules fp - exemple event['type']="squid" -- in fp_conf.sig: #{"squid":{"fields":["src_ip","dst_host","dst_ip","uri_proto","sig_detected_name","ioc_detected","tags"],"hashbit":8,"delay":3600}}
   #                                                    |-->   ^^^^^                        ^^^^^  
-  config :select_fp, :validate => :string, :default => "tags"
+  config :select_fp, :validate => :string, :default => "type"
   #Name of field to save fingerprint
   config :target_fp, :validate => :string, :default => "fingerprint"
   
@@ -85,10 +86,10 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   #Exemple: verify on field domain new value, if field domain in event content new value then add in db and tag event
   
   #File config - format: json {"rules": ["fieldy","fieldx"]}
-  config :conf_nv, :validate => :string, :default => "/etc/logstash/db/new.json"
+  config :conf_nv, :validate => :path, :default => "/etc/logstash/db/new.json"
 
   #File save db - format: json
-  config :db_nv, :validate => :string, :default => "/etc/logstash/db/new-save.json"
+  config :db_nv, :validate => :path, :default => "/etc/logstash/db/new-save.json"
 
   #if field exist in event then no apply new value tag
   config :noapply_sig_nv, :validate => :string, :default => "sig_no_apply_nv"
@@ -101,6 +102,34 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   
   #Name of prefix field to save new_value tag (prefix+field_name)
   config :target_nv, :validate => :string, :default => "new_value_"
+  
+  ############### CONFIG BL REPUTATION ###################
+  #Description: check if field value is present in DB REPUTATION
+  #JUST IP for first time
+  
+  #BL REPUT config - format: json {fieldx: {dbs: [file_name,...], note: X, id: X, category: "malware"}}
+  config :conf_bl, :validate => :path, :default => "/etc/logstash/db/conf_bl.json"
+  
+  #File contains BL REPUTATION
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webserver.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webclient.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset 
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_anonymous.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_proxies.netset
+  config :file_bl, :validate => :array, :default => ["/etc/logstash/db/firehol_level1.netset","/etc/logstash/db/firehol_level2.netset","/etc/logstash/db/firehol_level3.netset","/etc/logstash/db/firehol_level4.netset","/etc/logstash/db/firehol_webserver.netset","/etc/logstash/db/firehol_webclient.netset","/etc/logstash/db/firehol_abusers_30d.netset","/etc/logstash/db/firehol_anonymous.netset","/etc/logstash/db/firehol_proxies.netset"]
+
+  #if field exist in event then no apply new value tag
+  config :noapply_sig_bl, :validate => :string, :default => "sig_no_apply_bl"
+  
+  #interval to refresh conf new_value
+  config :refresh_interval_confbl, :validate => :number, :default => 3600
+  
+  #field where add information on category detected
+  config :targetname_bl, :validate => :string, :default => "bl_detected_category"
   
   ############### CONFIG SIG BASE ###################
   #numeric test: R[1]['champs0']['numope']['egal'|'inf'|'sup'|'diff']=numeric_value
@@ -127,8 +156,8 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   #order verify: FIELD, MOTIF, REGEXP
   #At first detected sig, then stop search another sig!!!!
   #File content rules signatures expression in json
-  config :conf_rules_sig, :validate => :string, :default => "/etc/logstash/db/sig.json"
-  config :file_save_localioc, :validate => :string, :default => "/etc/logstash/db/ioc_local.json"
+  config :conf_rules_sig, :validate => :path, :default => "/etc/logstash/db/sig.json"
+  config :file_save_localioc, :validate => :path, :default => "/etc/logstash/db/ioc_local.json"
   #format json -- example:
   #{"rules":[
   #      {"id":[22],"optid":[16,38],"opt_num":1,"noid":[],"note":3,"overwrite":true}
@@ -139,7 +168,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   # noid: list id of rules must absent
   # overwrite: if overwrite is true, it's significate than if note is more less then defined before, the value is overwrite and note is more less.
   # note: it's value of new note for event match.
-  config :conf_rules_note, :validate => :string, :default => "/etc/logstash/db/note.json"
+  config :conf_rules_note, :validate => :path, :default => "/etc/logstash/db/note.json"
   
   #Name of fields to save value if sig match: name sig, count
   config :target_sig, :validate => :string, :default => "sig_detected"
@@ -162,7 +191,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   # ioc_hostname_note give note to event if ioc match
   # ioc_hostname_iocid: give id number to ioc, used in note_sig for change note by relation with another match (sig...). 
   # Ioc ID must be more than 1000 -> 1001..1999
-  config :conf_ioc, :validate => :string, :default => "/etc/logstash/db/ioc_conf.json"
+  config :conf_ioc, :validate => :path, :default => "/etc/logstash/db/ioc_conf.json"
   
   #Name of fields to save value if ioc match: name ioc, count
   config :target_ioc, :validate => :string, :default => "ioc_detected"
@@ -183,11 +212,11 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   #Conf ref -- format json -- PIVOT -> SIG -> REF
   # rules[ {"pivot_field":[field1,field2], "list_sig": [fieldx,fieldy,...]} ]
   #list_sig: all field used for sig, if all field not present, it doesn't matter, use field present in event and list_sig
-  config :conf_ref, :validate => :string, :default => "/etc/logstash/db/conf_ref.json"
+  config :conf_ref, :validate => :path, :default => "/etc/logstash/db/conf_ref.json"
   #DB reference extract of ES by script
-  config :db_ref, :validate => :string, :default => "/etc/logstash/db/reference.json"
+  config :db_ref, :validate => :path, :default => "/etc/logstash/db/reference.json"
   #RegExp DB FILE
-  config :db_pattern, :validate => :string, :default => "/etc/logstash/db/pattern.db"
+  config :db_pattern, :validate => :path, :default => "/etc/logstash/db/pattern.db"
   #Interval to refresh db reference
   config :refresh_interval_dbref, :validate => :number, :default => 3600
   #if field exist in event then no apply check ref
@@ -207,7 +236,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   
   ##FREQUENCE
   #rules_freq = [ {'select_field': {'fieldx':[value_list],'fieldy':[value_list]}, 'note': X, 'refresh_time': Xseconds,'reset_time': Xseconds[1j], 'reset_hour': '00:00:00', 'wait_after_reset': 10, 'id': 30XXX},...]
-  config :conf_freq, :validate => :string, :default => "/etc/logstash/db/conf_freq.json"
+  config :conf_freq, :validate => :path, :default => "/etc/logstash/db/conf_freq.json"
   #Interval to refresh rules frequence
   config :refresh_interval_freqrules, :validate => :number, :default => 3600
   #if field exist in event then no apply check freq
@@ -245,6 +274,8 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @ref_rules = {}
     @freq_rules = {}
     @db_freq = {}
+    @bl_db = {} # {file_name:[IP]}
+    @bl_rules = {}
     ###
     ###special DB
     @sig_db_freq = {}
@@ -255,6 +286,8 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @hash_conf_freq = ""
     @hash_conf_fp = ""
     @hash_conf_nv = ""
+    @hash_conf_bl = ""
+    @hash_dbbl = {}
     @hash_dbioc = {}
     @hash_conf_ioc = ""
     @hash_dbref = ""
@@ -270,6 +303,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     load_conf_fp unless @disable_fp
     load_conf_nv unless @disable_nv
     load_conf_ioc unless @disable_ioc
+    load_conf_bl unless @disable_bl
     load_db_ioc unless @disable_ioc
     load_db_drop unless @disable_drop
     load_db_dropfp unless @disable_fp
@@ -280,6 +314,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @load_statut_rules = true
     @load_statut_fp = true
     @load_statut_nv = true
+    @load_statut_bl = true
     @save_statut_nv = true
     @load_statut_ioc = true
     @load_statut_ref = true
@@ -294,6 +329,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @next_refresh_dbioc = tnow + @refresh_interval_dbioc
     @next_refresh_confrules = tnow + @refresh_interval_confrules
     @next_refresh_confnv = tnow + @refresh_interval_confnv
+    @next_refresh_confbl = tnow + @refresh_interval_confbl
     @next_refresh_dbnv = tnow + @save_interval_dbnv
     @next_refresh_dropdb = tnow + @refresh_interval_dropdb
     @next_refresh_conffp = tnow + @refresh_interval_conffp
@@ -388,6 +424,59 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     end
     #########################
     
+    ######BL REPUTATION USE######
+    #reshresh conf & save db
+    unless @disable_bl
+      if @next_refresh_confbl < tnow
+        if @load_statut_bl == true
+          @load_statut_bl = false
+          load_conf_bl
+          @next_refresh_confbl = tnow + @refresh_interval_confbl
+          @load_statut_bl = true
+        end
+      end
+      sleep(1) until @load_statut_bl
+    end
+    #check if db &conf are not empty + select_fp exist
+    if not @bl_rules.empty? and not @bl_db.empty? and event.get(@noapply_sig_bl).nil? and not @disable_bl
+      #bl_rules: {fieldx: {dbs: [file_name,...], category: , note: X, id: X}}
+      #bl_db: {file_name: [IPs]}
+      #rule by rule
+      @bl_rules.each do |fkey,fval|
+        #veirfy field exist
+        if not event.get(fkey).nil?
+          #verify field contains IP
+          ip = ""
+          next if not ip = IPAddr.new(event.get(fkey).to_s) rescue false
+          for dbbl in fval['dbs']
+            #if @bl_db[dbbl].include?(ip)
+            if @bl_db[dbbl].any?{|block| block === ip}
+              #FIELD FIND IN DB BL REPUTATION
+              #ADD SCORE & ID & CAT
+              unless event.get(@targetnote).nil?
+                if event.get(@targetnote) < fval['note']
+                  event.set(@targetnote, detected_sig_note)
+                end
+              else
+                event.set(@targetnote, fval['note'])
+              end
+              unless event.get(@targetname_bl).nil?
+                event.set(@targetname_bl, event.get(@targetname_bl) + [fval['category']])
+              else
+                event.set(@targetname_bl, [fval['category']])
+              end
+              unless event.get(@targetid).nil?
+                event.set(@targetid, event.get(@targetid) + [fval['id']])
+              else
+                event.set(@targetid, [fval['id']])
+              end
+            end
+          end
+        end
+      end
+    end
+    #########################
+    
     ######IOC SEARCH######
     #refresh db
     unless @disable_ioc
@@ -411,6 +500,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       detected_ioc_note = 0
       #verify ioc by rules
       @ioc_rules.each do |rkey,rval|
+        #rule by rule
         if rval.is_a?(Array) and not rkey =~ /_downcase$|_iocnote$|_iocid$/ and @ioc_db[rkey.to_s]
           list_search = []
           #create list value by rule to check ioc
@@ -453,36 +543,36 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
             ioc_add.clear
           end
         end
-        #check if ioc find
-        if detected_ioc.any?
-          #ioc find, add information in event (count, name, id, note)
-          unless event.get(@target_ioc).nil?
-            event.set(@target_ioc, event.get(@target_ioc) + detected_ioc)
-          else
-            event.set(@target_ioc, detected_ioc)
-          end
-          unless event.get(@targetnum_ioc).nil?
-            event.set(@targetnum_ioc, event.get(@targetnum_ioc) + detected_ioc_count)
-          else
-            event.set(@targetnum_ioc, detected_ioc_count)
-          end
-          unless event.get(@targetname_ioc).nil?
-            event.set(@targetname_ioc, event.get(@targetname_ioc) + detected_ioc_name)
-          else
-            event.set(@targetname_ioc, detected_ioc_name)
-          end
-          unless event.get(@targetid).nil?
-            event.set(@targetid, event.get(@targetid) + detected_ioc_id)
-          else
-            event.set(@targetid, detected_ioc_id)
-          end
-          unless event.get(@targetnote).nil?
-            if event.get(@targetnote) < detected_ioc_note
-              event.set(@targetnote, detected_ioc_note)
-            end
-          else
+      end
+      #check if ioc find
+      if detected_ioc.any?
+        #ioc find, add information in event (count, name, id, note)
+        unless event.get(@target_ioc).nil?
+          event.set(@target_ioc, event.get(@target_ioc) + detected_ioc)
+        else
+          event.set(@target_ioc, detected_ioc)
+        end
+        unless event.get(@targetnum_ioc).nil?
+          event.set(@targetnum_ioc, event.get(@targetnum_ioc) + detected_ioc_count)
+        else
+          event.set(@targetnum_ioc, detected_ioc_count)
+        end
+        unless event.get(@targetname_ioc).nil?
+          event.set(@targetname_ioc, event.get(@targetname_ioc) + detected_ioc_name)
+        else
+          event.set(@targetname_ioc, detected_ioc_name)
+        end
+        unless event.get(@targetid).nil?
+          event.set(@targetid, event.get(@targetid) + detected_ioc_id)
+        else
+          event.set(@targetid, detected_ioc_id)
+        end
+        unless event.get(@targetnote).nil?
+          if event.get(@targetnote) < detected_ioc_note
             event.set(@targetnote, detected_ioc_note)
           end
+        else
+          event.set(@targetnote, detected_ioc_note)
         end
       end
     end
@@ -1510,9 +1600,8 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_fp
     end
     #chekc if db &conf are not empty + select_fp exist
-    if not @fp_rules.empty? and not @fp_db.empty? and not event.get(@select_fp).nil? and not @disable_fp
+    if not @fp_rules.empty? and not @fp_db.nil? and not event.get(@select_fp).nil? and not @disable_fp
       to_string = ""
-      #select_fp can be type Array or String
       if event.get(@select_fp).is_a?(Array)
         for elemsfp in event.get(@select_fp)
           #check if rules match with select_fp (case: Array)
@@ -1581,19 +1670,19 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
               @fingerprint_db[event.get(@target_fp)] = tnow +@fp_rules[event.get(@select_fp)]['delay']
               #(event[@target_tag_fp] ||= []) << @tag_name_first
               event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
-              event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_first)
+              event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_first])
             else
               #add tag
               #(event[@target_tag_fp] ||= []) << @tag_name_after
               event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
-              event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_after)
+              event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_after])
             end
           else
             #key not exist -- new event
             @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[event.get(@select_fp)]['delay']
             #(event[@target_tag_fp] ||= []) << @tag_name_first
             event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
-            event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_first)
+            event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_first])
           end
         end
       end
@@ -1791,7 +1880,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       @hash_dbref = tmp_hash
       tmp_db = JSON.parse( IO.read(@db_ref, encoding:'utf-8') ) 
       unless tmp_db.nil?
-        #TODO
+        @ref_db = tmp_db
       end
       @logger.info("loading/refreshing REFERENCES DB")
     end
@@ -1814,6 +1903,68 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       @logger.info("loading/refreshing REFERENCES conf rules")
     end
   end
+  def load_conf_bl
+    #load file
+    for f in @file_bl
+      if !File.exists?(f)
+        @logger.warn("DB file read failure, stop loading", :path => f)
+        return
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read f
+      if @hash_dbbl[f]
+        if not tmp_hash == @hash_dbioc[f]
+          #change
+          @bl_db[File.basename(f)].clear
+          @hash_dbbl[f] = tmp_hash
+          File.readlines(f).each do |line|
+            line=line.strip
+            ip = ""
+            @bl_db[File.basename(f)].push(ip) if ip = IPAddr.new(line) rescue false
+          end
+        end
+      else
+        #unknown
+        @bl_db[File.basename(f)] = []
+        @hash_dbbl[f] = tmp_hash
+        File.readlines(f).each do |line|
+          line=line.strip
+          ip = ""
+          @bl_db[File.basename(f)].push(ip) if ip = IPAddr.new(line) rescue false
+        end
+      end
+      @logger.info("loading/refreshing DB BL REPUTATION file(s): #{File.basename(f)}")
+    end
+    #load conf
+    if !File.exists?(@conf_bl)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_bl)
+      return
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_bl
+    if not tmp_hash == @hash_conf_bl
+      @hash_conf_bl = tmp_hash
+      tmp_db = JSON.parse( IO.read(@conf_bl, encoding:'utf-8') ) 
+      unless tmp_db.nil?
+        #{fieldx: {dbs: [file_name,...], catergory: , note: X, id: X}}
+        #verify dbs filename exist
+        tmp_db.each do |fkey,fval|
+          if fval['dbs'].is_a?(Array)
+            for fn in fval['dbs']
+              if @bl_db[fn].nil?
+                @logger.error("You use a file name not exist in conf BL REPUTATION!!!")
+                return
+              end
+            end
+          else
+            @logger.error("DBS field not exist in JSON conf BL REPUTATION!!")
+            return
+          end
+        end
+        @bl_rules = tmp_db
+      end
+      @logger.info("loading/refreshing Conf BL REPUTATION #{@bl_db}")
+    end
+  end
+  
   def load_conf_rules_sig
     if !File.exists?(@conf_rules_sig)
       @logger.warn("DB file read failure, stop loading", :path => @conf_rules_sig)
