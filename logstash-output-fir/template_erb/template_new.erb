@@ -4,7 +4,7 @@
 
 ### Tags: <%= event.get("tags").to_s %>
 
-### <%= event.get("fingerprint").to_s + " -> SCORE:" + event.get("sig_detected_note").to_s + " with ID(s): "event.get("sig_detected_id").to_s %>
+### <%= event.get("fingerprint").to_s + " -> SCORE:" + event.get("sig_detected_note").to_s + " with ID(s): " + event.get("sig_detected_id").to_s %>
 
 Event: <%= JSON.pretty_generate(event.to_hash).gsub(/\P{ASCII}/, "?") %>
 
@@ -16,6 +16,3 @@ Event: <%= JSON.pretty_generate(event.to_hash).gsub(/\P{ASCII}/, "?") %>
 #### False positive
 
 ["Add false positive](https://myip_for_false:8002/add_fp.php?fingerprint=<%= event.get("fingerprint") %>)
-
-
-                      body["subject"] = "Alerte automatique on -" + event["src_ip"] + "- New at " + tnow.strftime("%Y-%m-%dT%H:%M").to_s

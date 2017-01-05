@@ -1,4 +1,7 @@
 # encoding: utf-8
+# Output "FIR" send alert to FIR platform (CERT SG)
+# can be use with logstash-filter-sig
+# Contact: Lionel PRAT (lionel.prat9@gmail.com)
 require "logstash/outputs/base"
 require "logstash/namespace"
 require "json"

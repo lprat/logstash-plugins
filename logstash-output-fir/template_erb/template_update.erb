@@ -4,7 +4,7 @@
 
 ### Tags: <%= event.get("tags").to_s %>
 
-### <%= event.get("fingerprint").to_s + " -> SCORE:" + event.get("sig_detected_note").to_s + " with ID(s): "event.get("sig_detected_id").to_s %>
+### <%= event.get("fingerprint").to_s + " -> SCORE:" + event.get("sig_detected_note").to_s + " with ID(s): " + event.get("sig_detected_id").to_s %>
 
 Event: <%= JSON.pretty_generate(event.to_hash).gsub(/\P{ASCII}/, "?") %>
 
