@@ -251,9 +251,9 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
                 else
                   incident[@body_field] = ERB.new(@template_data_u).result(binding) + incident[@body_field]
                 end
-                url = @url_api_fir + "incidents/" + body["id"].to_s
+                url = @url_api_fir + "incidents/" + incident["id"].to_s
                 begin
-                  response = @client.patch(url, :body => body.to_json, :headers => @headers)
+                  response = @client.patch(url, :body => incident.to_json, :headers => @headers)
                   if response.code < 200 and response.code > 299
                     log_failure(
                       "Encountered non-200 HTTP code #{200}",
