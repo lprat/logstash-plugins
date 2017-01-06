@@ -10,8 +10,9 @@ Event: <%= JSON.pretty_generate(event.to_hash).gsub(/\P{ASCII}/, "?") %>
 
 #### Links to get informations on IP & Domain name
 
-[Info domain](https://www.virustotal.com/fr/domain/<%= event.get("dst_domain") %>/information/)  
-[Info IP](https://www.virustotal.com/fr/ip-address/<%= event.get("dst_ip") %>/information/)  
+[Info domain VT](https://www.virustotal.com/fr/domain/<%= event.get("dst_domain") %>/information/)  
+[Info IP VT](https://www.virustotal.com/fr/ip-address/<%= event.get("dst_ip") %>/information/)  
+[Info IP OTX](https://otx.alienvault.com/indicator/ip/<%= event.get("dst_ip") %>/)  
 
 #### False positive
 
