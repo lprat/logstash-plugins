@@ -1,0 +1,34 @@
+version: '2'
+
+services:
+    logstash-fir:
+        build:
+            context: .
+            args:
+                - http_proxy=${http_proxy}
+                - https_proxy=${https_proxy}
+                #!!! set http_proxy_host & http_proxy_port before run docker-compose build
+                - JRUBY_OPTS="-J-Dhttp.proxyHost=${http_proxy_host} -J-Dhttp.proxyPort=${http_proxy_port}"
+                - no_proxy=${no_proxy}
+        #mem_reservation: 512m
+        #memswap_limit: 1g
+        #mem_limit: 1g
+        #cpuset: 1
+        #!!!run git-logstash-fir for load good configuration for instance before RUN docker composer!!!!
+        volumes:
+            - /opt/logstash-instance-x:/etc/logstash
+        #open port logstash use in input
+        ports:
+            - "5000:5000"
+        #depends_on:
+        #external_links:
+        #environment:
+        #    - ES_JAVA_OPTS="-Xms256m -Xmx1g"
+        #env_file:
+        restart: always
+        command: logstash -f /etc/logstash/conf.d/ -w 5 -r
+        logging:
+            driver: "syslog"
+            options:
+                syslog-address=tcp://172.17.0.1:514
+                tag="docker_{{.ImageName}}_{{.Name}}"

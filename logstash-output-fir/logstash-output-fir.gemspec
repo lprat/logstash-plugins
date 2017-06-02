@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = 'logstash-output-fir'
-  s.version         = "2.0.0"
+  s.version         = "0.9.0"
   s.licenses = ["Apache License (2.0)"]
   s.summary = "This fir output send alert of sig filter to FIR (https://github.com/certsocietegenerale/FIR)."
   s.description     = "This gem is a Logstash plugin required to be installed on top of the Logstash core pipeline using $LS_HOME/bin/logstash-plugin install fir. This gem is not a stand-alone program"
@@ -18,12 +18,7 @@ Gem::Specification.new do |s|
   s.metadata = { "logstash_plugin" => "true", "logstash_group" => "output" }
 
   # Gem dependencies
+  # Gem dependencies
   s.add_runtime_dependency "logstash-core-plugin-api", ">= 1.60", "<= 2.99"
-  s.add_runtime_dependency "logstash-codec-plain"
-  s.add_development_dependency "logstash-devutils"
-  if RUBY_PLATFORM == 'java'
-    s.platform = RUBY_PLATFORM
-    s.add_runtime_dependency "manticore", '>= 0.5.4', '< 1.0.0'
-  end
-
+  s.add_development_dependency 'logstash-devutils'
 end

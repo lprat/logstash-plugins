@@ -35,6 +35,9 @@ Logstash plugin Filter "Sig" can help you to detect security threat in log by di
 * Note/Score functionnality for change score (up or down) of alert with correlate IOC/multi SIG/REF match
 * By frequence but create alert not defined reason, just know log loading up and not normaly. You can select frequence on specifique event by filters
 
+## logstash-filter-ensig
+Logstash plugin Filter "EnrSig" can help you to enrich event with different sources informations. It use system command with arguments for enrich event.
+
 ## logstash-output-fir
 Logstash plugin Output for send alert (created by filter sig) in FIR (Cert SG - https://github.com/certsocietegenerale/FIR) 
 

@@ -24,6 +24,12 @@ require 'time'
 # Optimiz
 
 #TODO: SIG add tag on sig for FIR
+class ::Hash
+    def deep_merge(second)
+        merger = proc { |key, v1, v2| Hash === v1 && Hash === v2 ? v1.merge(v2, &merger) : v2 }
+        self.merge(second, &merger)
+    end
+end
 
 class LogStash::Filters::Sig < LogStash::Filters::Base
   config_name "sig"
@@ -40,6 +46,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   config :no_check, :validate => :string, :default => "sig_no_apply_all"
   #disable functions
   config :disable_drop, :validate => :boolean, :default => false
+  config :disable_enr, :validate => :boolean, :default => false
   config :disable_fp, :validate => :boolean, :default => false
   config :disable_nv, :validate => :boolean, :default => false
   config :disable_bl, :validate => :boolean, :default => false
@@ -80,6 +87,27 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   config :refresh_interval_conffp, :validate => :number, :default => 3600
   #interval to refresh database rules & fingerprint
   config :refresh_interval_dropdb, :validate => :number, :default => 3600
+
+  ############### CONFIG ENRICHMENT ###################
+  #Description: add info in event by enrichment active or passive
+  
+  #File config - format: json 
+  config :conf_enr, :validate => :path, :default => "/etc/logstash/db/enr.json"
+
+  #if field exist in event then no apply new value tag
+  config :noapply_sig_enr, :validate => :string, :default => "sig_no_apply_enr"
+  
+  #interval to refresh conf new_value
+  config :refresh_interval_enr, :validate => :number, :default => 3600
+
+  #field name where you add request for server add information active
+  config :field_enr, :validate => :string, :default => "request_enrichiment"
+  
+  #enr_tag_response used for identify who is origin of resquest, and send response to good server
+  config :enr_tag_response, :validate => :string, :required => :true, :default => "ENR_RETURN_TO_JOHN"
+  
+  #When information not in db and you must to have, send event to another server (contacted by lumberjack) who ask info and add in @field_enr
+  # after add info in field, resend to server origin by lumberjack
   
   ############### CONFIG NEW VALUE ###################
   #Description: check by rule if event is new and tag event
@@ -276,6 +304,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @db_freq = {}
     @bl_db = {} # {file_name:[IP]}
     @bl_rules = {}
+    @db_enr = {}
     ###
     ###special DB
     @sig_db_freq = {}
@@ -295,6 +324,9 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @hash_conf_ref = ""
     @hash_dropdb = ""
     @hash_dropfp = ""
+    @hash_conf_enr = ""
+    @hash_dbfile_enr = {}
+    @hash_db_enr = {}
     ###
     #load conf & db
     @load_statut = false
@@ -310,6 +342,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     load_db_pattern unless @disable_ref
     load_db_ref unless @disable_ref
     load_rules_freq unless @disable_freq
+    load_db_enr unless @disable_enr
     @load_statut = true
     @load_statut_rules = true
     @load_statut_fp = true
@@ -321,6 +354,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @load_statut_drop = true
     @load_statut_freqrules = true
     @load_statut_note = true
+    @load_statut_enr = true
     ###
     @logger.info("finish")
     #next refresh file
@@ -335,6 +369,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @next_refresh_conffp = tnow + @refresh_interval_conffp
     @next_refresh_note = tnow + @refresh_interval_confrules
     @next_refresh_freqrules = tnow + @refresh_interval_freqrules
+    @next_refresh_enr = tnow + @refresh_interval_enr
     ###
   end # def register
 
@@ -372,6 +407,194 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     end
     #######################
     
+    ######ENRICHISSEMENT: add info db local, active info, ...######
+    #{"1": {file: path_db, db: {loaded by path db contains hash},"prefix": "prefix_...", filters: {field:regexp,...}, link: [["name_field_select_value_to_search_in_db",...],[WHOIS2,...]], "form_in_db": "https://$1$:$2$", if_empty: 'WHOIS'}, "filter_insert": [], "filter_noinsert": []}
+    # in db {'value_field_link': {name_info1: info1, name_info2: info2, ...}}
+    #probleme sur link lié a la construction d'un nom dans la base par exemple https://host:port (3 fields)
+    #2 eme cas quand l'on veut faire un whois sur plusieurs field: champs1 et champs2
+    #create var for add new field name (for check drop)
+    #choose order for link by enrichissment ex: infoclient -> IP (get MAC by db ip2mac) and second time get info by mac
+    new_field_enr = []
+    #refresh db
+    unless @disable_enr
+      if @next_refresh_enr < tnow
+        if @load_statut_enr == true
+          @load_statut_enr = false
+          save_dbs_enr # save db with news data response -TODO  -> 1 verify if db change (md5 hash) if no change save, if change... create diff with save!
+          #load_db_enr #load - use save for load too
+          @next_refresh_enr = tnow + @refresh_interval_enr
+          @load_statut_enr = true
+        end
+      end
+      sleep(1) until @load_statut_enr
+    end
+    #check if db is not empty
+    if not @db_enr.empty? and event.get(@noapply_sig_enr).nil? and not @disable_enr
+      if event.get(@field_enr).is_a?(Array)
+        #check response by response
+        for respo in event.get(@field_enr)
+          respo.each do |rkey,rval| #{rval['if_empty'] => {"id": rkey.to_s, "field": lval.to_s}}
+            next if rval['id'].nil? or rval['field'].nil? or rval['name_in_db'].nil? or rval['response'].nil? or @db_enr[rval['id'].to_s].nil?
+            #add in event
+            rval['response'].each do |xk,xval|
+              next if xval.empty? or @db_enr[rval['id'].to_s]["filter_noinsert"].include?(xk) or (not @db_enr[rval['id'].to_s]["filter_insert"].include?(xk) and not @db_enr[rval['id'].to_s]["filter_insert"].empty? and @db_enr[rval['id'].to_s]["filter_noinsert"].empty?)
+              #!!! overwrite if exist!!!
+              event.set(@db_enr[rval['id'].to_s]['prefix'].to_s+xk.to_s,xval)
+              #add in "FIELD_TEMP_ENR_DROP_NEW"
+              if event.get("FIELD_TEMP_ENR_DROP_NEW").nil?
+                 event.set("FIELD_TEMP_ENR_DROP_NEW",[(@db_enr[rval['id'].to_s]['prefix'].to_s+xk.to_s)])
+              else
+                 event.set("FIELD_TEMP_ENR_DROP_NEW",event.get("FIELD_TEMP_ENR_DROP_NEW")+[(@db_enr[rval['id'].to_s]['prefix'].to_s+xk.to_s)])
+              end
+            end
+            #add info in db
+            if rval['name_in_db'].empty? and rval['response'].is_a?(Hash) and not rval['response'].empty?
+              @db_enr[rval['id'].to_s]['db'][rval['name_in_db'].to_s] = rval['response']
+            end
+          end
+        end
+        #clean event
+        event.remove(@field_enr)
+      else
+        #check rule by rule
+        eventK = event.to_hash.keys
+        @db_enr.each do |rkey,rval|
+          # rule by rule
+          #check filter
+          #chekc is all keys present in event
+          inter = rval['filters'].keys & eventK
+          #check if fields rule present in event
+          if inter.length == rval['filters'].keys.length
+            #field present
+            #check filed by field
+            sig_add = {}
+            check_sig=false
+            for kfield in inter
+              check_sig=false
+              # field X -- check type
+              if event.get(kfield).is_a?(Array)
+                #array type
+                # if rule value regexp is Array?
+                if rval['filters'][kfield].is_a?(Array)
+                  for regexp in rval['filters'][kfield]
+                    check_sig=false
+                    for elem in event.get(kfield)
+                      match = Regexp.new(regexp, nil, 'n').match(elem.to_s)
+                      if not match.nil?
+                        check_sig=true
+                        break
+                      end
+                    end
+                    break unless check_sig
+                  end
+                else
+                  #rule not array
+                  for elem in event.get(kfield)
+                    match = Regexp.new(rval['filters'][kfield], nil, 'n').match(elem.to_s)
+                    if not match.nil?
+                      check_sig=true
+                      break
+                    end
+                  end
+                end
+              else
+                #other type
+                # if rule value regexp is Array?
+                if rval['filters'][kfield].is_a?(Array)
+                  #array
+                  for regexp in rval['filters'][kfield]
+                    match = Regexp.new(regexp, nil, 'n').match(event.get(kfield).to_s)
+                    if not match.nil?
+                      sig_add[kfield.to_s]="Regexp found #{match}"
+                      check_sig=true
+                      next
+                    end
+                    break unless check_sig
+                  end
+                else
+                  #other
+                  match = Regexp.new(rval['filters'][kfield], nil, 'n').match(event.get(kfield).to_s)
+                  if not match.nil?
+                    check_sig=true
+                    next
+                  end
+                end
+              end
+              break unless check_sig
+            end
+            #check if filters match
+            if check_sig
+              #matched
+              #check if link present in event & db & link not empty
+              next if rval['link'].empty?
+              next if rval['form_in_db'].empty?
+              lkey=rval['form_in_db'].dup
+              pnext=false
+              cnt_e=0
+              for lval in rval['link']
+                cnt_e+=1
+                if event.get(lval.to_s).nil?
+                  pnext=true
+                  break
+                else
+                  #create dbkey
+                  lkey.gsub! '$'+cnt_e.to_s+'$', event.get(lval.to_s)
+                end
+              end
+              next if pnext
+              next if cnt_e != rval['link'].length or lkey =~ /\$\d+\$/
+              if not rval['db'][lkey.to_s].is_a?(Hash)
+                #if not present and must present, then send to server active enrichissement and wait to return 
+                #check if if_empty exist?
+                if rval['if_empty'].is_a?(String) and not rval['if_empty'].empty?
+                  #send requets to server for resolve information
+                  #Add field request_resolv: [{WHOIS: {"id": id_rule, "field": field_name}},{SSL: {"id": id_rule, "field": field_name}}]
+                  #TODO verify number of element in form and link
+                  request_enr = {rval['if_empty'] => {"id" => rkey.to_s, "field" => rval['link'], "name_in_db" => lkey}}
+                  if event.get(@field_enr).nil?
+                    event.set(@field_enr,[request_enr])
+                  else
+                    event.set(@field_enr,event.get(@field_enr)+[request_enr])
+                  end
+                  #send to server (at end, for possible add multi request by rule
+                end
+              else
+                #if present add
+                next if not rval['prefix'].is_a?(String) or rval['prefix'].empty?
+                #"filter_insert": [], "filter_noinsert": []
+                rval['db'][lkey].each do |xk,xval|
+                  next if xval.empty? or rval["filter_noinsert"].include?(xk) or (not rval["filter_insert"].include?(xk) and not rval["filter_insert"].empty? and rval["filter_noinsert"].empty?)
+                  #!!! overwrite if exist!!!
+                  event.set(rval['prefix'].to_s+xk.to_s,xval)
+                  #add in new_field_enr
+                  new_field_enr.push(*(rval['prefix'].to_s+xk.to_s))
+                end
+              end            
+            end
+          end
+        end
+        event.tag(@enr_tag_response) if not event.get(@field_enr).nil?
+        event.set("FIELD_TEMP_ENR_DROP_NEW",new_field_enr)
+        #when event.get(@field_enr) is set hten not check apply on event, in configuration add to send to server enrichment which resend after add informations
+      end
+    end
+    #######################
+    
+    ######DROP SECOND######
+    ## JUST CHECK NEW FIELD (created by enr)
+    #check if db not empty 
+    if not @drop_db.empty? and event.get(@noapply_sig_dropdb).nil? and not @disable_drop and event.get(@field_enr).nil? and not event.get("FIELD_TEMP_ENR_DROP_NEW").nil?
+      for nfield in event.get("FIELD_TEMP_ENR_DROP_NEW")
+        if @drop_db[nfield] and event.get(nfield).is_a?(String) and event.get(nfield) =~ /#{@drop_db[nfield]}/
+          #key exist and match with regexp
+          event.cancel
+          return
+        end
+      end
+    end
+    event.remove("FIELD_TEMP_ENR_DROP_NEW")
+    #######################
+    
     ######New Value USE######
     #reshresh conf & save db
     unless @disable_nv
@@ -394,7 +617,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_nv
     end
     #check if db &conf are not empty + select_fp exist
-    if not @nv_rules.empty? and @nv_rules['rules'].is_a?(Array) and not @nv_db.empty? and event.get(@noapply_sig_nv).nil? and not @disable_nv
+    if not @nv_rules.empty? and @nv_rules['rules'].is_a?(Array) and not @nv_db.empty? and event.get(@noapply_sig_nv).nil? and not @disable_nv and event.get(@field_enr).nil?
       #check all rules
       for rule in @nv_rules['rules']
         #if rule exist in event?
@@ -438,7 +661,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_bl
     end
     #check if db &conf are not empty + select_fp exist
-    if not @bl_rules.empty? and not @bl_db.empty? and event.get(@noapply_sig_bl).nil? and not @disable_bl
+    if not @bl_rules.empty? and not @bl_db.empty? and event.get(@noapply_sig_bl).nil? and not @disable_bl and event.get(@field_enr).nil?
       #bl_rules: {fieldx: {dbs: [file_name,...], category: , note: X, id: X}}
       #bl_db: {file_name: [IPs]}
       #rule by rule
@@ -492,7 +715,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_ioc
     end
     #check db not empty
-    if not @ioc_rules.empty? and not @ioc_db.empty? and event.get(@noapply_ioc).nil? and not @disable_ioc
+    if not @ioc_rules.empty? and not @ioc_db.empty? and event.get(@noapply_ioc).nil? and not @disable_ioc and event.get(@field_enr).nil?
       detected_ioc = Array.new
       detected_ioc_count = 0
       detected_ioc_name = Array.new
@@ -592,7 +815,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       end
       sleep(1) until @load_statut_rules
     end
-    if not @sig_db.empty? and event.get(@noapply_sig_rules).nil? and not @disable_sig
+    if not @sig_db.empty? and event.get(@noapply_sig_rules).nil? and not @disable_sig and event.get(@field_enr).nil?
       #create var local for all rules check
       detected_sig = Array.new
       detected_sig_name = Array.new
@@ -600,7 +823,6 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       detected_sig_note = 0
       detected_sig_id = Array.new
       detected_sig_id_corre = Array.new
-      detected_extract = Array.new
       type_sig = 0
       type_obl = 0
       # get list of all name field present in event
@@ -1111,32 +1333,32 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                       @sig_db_freq[hash_field]['count'] = 1
                       @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_delay"]
                       if sig_add["correlate_change_fieldvalue"]
-                        fields-corre_value=""
+                        fields_corre_value=""
                         @sig_db_freq[hash_field]['corre_value'] = []
                         for fy in sig_add["freq_field"]
                           if event.get(fy)
-                            fields-corre_value = fields-corre_value + event.get(fy).to_s.downcase
+                            fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
                           end
                         end
-                        @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields-corre_value.to_s).force_encoding(Encoding::UTF_8))
+                        @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8))
                       end 
                       @sig_db_freq[hash_field]['valid'] = false
                     else
                       #ok count, because delay is valid
                       #check if sig_add["correlate_change_fieldvalue"] is present
-                      hash-corre_value = ""
+                      hash_corre_value = ""
                       if sig_add["correlate_change_fieldvalue"]
-                        fields-corre_value=""
+                        fields_corre_value=""
                         for fy in sig_add["freq_field"]
                           if event.get(fy)
-                            fields-corre_value = fields-corre_value + event.get(fy).to_s.downcase
+                            fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
                           end
                         end
-                        hash-corre_value = OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields-corre_value.to_s).force_encoding(Encoding::UTF_8)
-                        if not @sig_db_freq[hash_field]['corre_value'].include?(hash-corre_value)
+                        hash_corre_value = OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8)
+                        if not @sig_db_freq[hash_field]['corre_value'].include?(hash_corre_value)
                           #if correlate hash not exist count ++
                           @sig_db_freq[hash_field]['count'] = @sig_db_freq[hash_field]['count'] + 1
-                          @sig_db_freq[hash_field]['corre_value'].push(*hash-corre_value)
+                          @sig_db_freq[hash_field]['corre_value'].push(*hash_corre_value)
                         end
                       else
                         #no correlate
@@ -1157,13 +1379,13 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                       @sig_db_freq[hash_field]['count'] = 1
                       if sig_add["correlate_change_fieldvalue"]
                         @sig_db_freq[hash_field]['corre_value'] = []
-                        fields-corre_value=""
+                        fields_corre_value=""
                         for fy in sig_add["freq_field"]
                           if event.get(fy)
-                            fields-corre_value = fields-corre_value + event.get(fy).to_s.downcase
+                            fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
                           end
                         end
-                        @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields-corre_value.to_s).force_encoding(Encoding::UTF_8))
+                        @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8))
                       end
                       @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_delay"]
                       @sig_db_freq[hash_field]['valid'] = false
@@ -1174,14 +1396,14 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                   @sig_db_freq[hash_field] = {}
                   @sig_db_freq[hash_field]['count'] = 1
                   if sig_add["correlate_change_fieldvalue"]
-                    fields-corre_value=""
+                    fields_corre_value=""
                     @sig_db_freq[hash_field]['corre_value'] = []
                     for fy in sig_add["freq_field"]
                       if event.get(fy)
-                        fields-corre_value = fields-corre_value + event.get(fy).to_s.downcase
+                        fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
                       end
                     end
-                    @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields-corre_value.to_s).force_encoding(Encoding::UTF_8))
+                    @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8))
                   end
                   @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_delay"]
                   @sig_db_freq[hash_field]['valid'] = false
@@ -1287,7 +1509,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_rules
     end
     #check if db and rule not empty 
-    if not @ref_rules.empty? and not @ref_db.empty? and not @pattern_db and not @disable_ref and event.get(@noapply_ref).nil?
+    if not @ref_rules.empty? and not @ref_db.empty? and not @pattern_db and not @disable_ref and event.get(@noapply_ref).nil? and event.get(@field_enr).nil?
       #list all rules
       #!!!! amelioration de la sig avec simhash...
       detected_ref = Array.new
@@ -1356,7 +1578,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                 tmp_detect[r_rule["id"].to_s][field.to_s]={}
                 string_field = true
                 #CHECK: TYPE -> int/string/array/hash/... not for note, juste for next step for good choice => nummber or string analysis
-                if ['boolean', 'long', 'integer', 'short', 'byte', 'double', 'float'].include?(@ref_db[r_rule["id"].to_s][field]['TYPE'].to_s )
+                if ['boolean', 'long', 'integer', 'short', 'byte', 'double', 'float'].include?(@ref_db[r_rule["id"].to_s][field]['TYPE'].to_s)
                   string_field = false
                 end
                 #CHECK: LIST_VALUE is not empty then check if contains
@@ -1534,7 +1756,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_note
     end
     #check if db note empty and @targetid in event exist
-    if not @note_db.empty? and not event.get(@targetid).nil? and not @disable_note
+    if not @note_db.empty? and not event.get(@targetid).nil? and not @disable_note and event.get(@field_enr).nil?
       note_max=0
       overwrite=false
       #check all rules
@@ -1600,7 +1822,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_fp
     end
     #chekc if db &conf are not empty + select_fp exist
-    if not @fp_rules.empty? and not @fp_db.nil? and not event.get(@select_fp).nil? and not @disable_fp
+    if not @fp_rules.empty? and not @fp_db.nil? and not event.get(@select_fp).nil? and not @disable_fp and event.get(@field_enr).nil?
       to_string = ""
       if event.get(@select_fp).is_a?(Array)
         for elemsfp in event.get(@select_fp)
@@ -1625,7 +1847,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
                 #key existe -- event known
                 if @fingerprint_db[event.get(@target_fp)] < tnow
                   #date is passed
-                  @fingerprint_db[event.get(@target_fp)] = tnow +@fp_rules[elemsfp.to_s]['delay']
+                  @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[elemsfp.to_s]['delay']
                   #(event[@target_tag_fp] ||= []) << @tag_name_first
                   event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
                   event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_first)
@@ -1667,7 +1889,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
             #key existe -- event known
             if @fingerprint_db[event.get(@target_fp)] < tnow
               #date is passed
-              @fingerprint_db[event.get(@target_fp)] = tnow +@fp_rules[event.get(@select_fp)]['delay']
+              @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[event.get(@select_fp)]['delay']
               #(event[@target_tag_fp] ||= []) << @tag_name_first
               event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
               event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_first])
@@ -1714,7 +1936,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
       sleep(1) until @load_statut_freqrules
     end
     #verify db & rules is not empty
-    if not @freq_rules.empty? and not @db_freq.empty? and not @disable_freq and event.get(@noapply_freq).nil?
+    if not @freq_rules.empty? and not @db_freq.empty? and not @disable_freq and event.get(@noapply_freq).nil? #and event.get(@field_enr).nil?
       eventK = event.to_hash.keys
       #CHECK RULE BY RULE
       no_match = true
@@ -1831,34 +2053,38 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   def load_rules_freq
     if !File.exists?(@conf_freq)
       @logger.warn("DB file read failure, stop loading", :path => @conf_freq)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_freq
     if not tmp_hash == @hash_conf_freq
       @hash_conf_freq = tmp_hash
-      tmp_db = JSON.parse( IO.read(@conf_freq, encoding:'utf-8') ) 
-      unless tmp_db.nil?
-        if tmp_db['rules'].is_a?(Array)
-          @freq_rules = tmp_db['rules']
-          #CREATE DB with ID
-          for rulex in @freq_rules
-            if @db_freq[rulex['id']].nil?
-              @db_freq[rulex['id']]={}
-              @db_freq[rulex['id']]['num_time']=0
-              @db_freq[rulex['id']]['count_cour']=0
-              @db_freq[rulex['id']]['reset_time']=0
-              @db_freq[rulex['id']]['status_acces']=true
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_freq, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          if tmp_db['rules'].is_a?(Array)
+            @freq_rules = tmp_db['rules']
+            #CREATE DB with ID
+            for rulex in @freq_rules
+              if @db_freq[rulex['id']].nil?
+                @db_freq[rulex['id']]={}
+                @db_freq[rulex['id']]['num_time']=0
+                @db_freq[rulex['id']]['count_cour']=0
+                @db_freq[rulex['id']]['reset_time']=0
+                @db_freq[rulex['id']]['status_acces']=true
+              end
             end
           end
         end
+        @logger.info("loading/refreshing REFERENCES conf rules")
+      rescue
+        @logger.error("JSON CONF SIG -- FREQ RULES-- PARSE ERROR")
       end
-      @logger.info("loading/refreshing REFERENCES conf rules")
     end
   end
   def load_db_pattern
     if !File.exists?(@db_pattern)
       @logger.warn("DB file read failure, stop loading", :path => @db_pattern)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @db_pattern
     if not tmp_hash == @hash_dbpattern
@@ -1873,34 +2099,41 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   def load_db_ref
     if !File.exists?(@db_ref)
       @logger.warn("DB file read failure, stop loading", :path => @db_ref)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @db_ref
     if not tmp_hash == @hash_dbref
       @hash_dbref = tmp_hash
-      tmp_db = JSON.parse( IO.read(@db_ref, encoding:'utf-8') ) 
-      unless tmp_db.nil?
-        @ref_db = tmp_db
+      begin
+        tmp_db = JSON.parse( IO.read(@db_ref, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          @ref_db = tmp_db
+        end
+        @logger.info("loading/refreshing REFERENCES DB")
+      rescue
       end
-      @logger.info("loading/refreshing REFERENCES DB")
     end
     #CONF    
     if !File.exists?(@conf_ref)
       @logger.warn("DB file read failure, stop loading", :path => @conf_ref)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_ref
     if not tmp_hash == @hash_conf_ref
       @hash_conf_ref = tmp_hash
-      tmp_db = JSON.parse( IO.read(@conf_ref, encoding:'utf-8') ) 
-      unless tmp_db.nil?
-        unless tmp_db['rules'].nil?
-          if tmp_db['rules'].is_a?(Array)
-            @ref_rules= tmp_db['rules']
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_ref, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          unless tmp_db['rules'].nil?
+            if tmp_db['rules'].is_a?(Array)
+              @ref_rules= tmp_db['rules']
+            end
           end
         end
+        @logger.info("loading/refreshing REFERENCES conf rules")
+      rescue
+        @logger.error("JSON CONF SIG -- DB REF -- PARSE ERROR")
       end
-      @logger.info("loading/refreshing REFERENCES conf rules")
     end
   end
   def load_conf_bl
@@ -1908,7 +2141,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     for f in @file_bl
       if !File.exists?(f)
         @logger.warn("DB file read failure, stop loading", :path => f)
-        return
+        exit -1
       end
       tmp_hash = Digest::SHA256.hexdigest File.read f
       if @hash_dbbl[f]
@@ -1937,114 +2170,131 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     #load conf
     if !File.exists?(@conf_bl)
       @logger.warn("DB file read failure, stop loading", :path => @conf_bl)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_bl
     if not tmp_hash == @hash_conf_bl
       @hash_conf_bl = tmp_hash
-      tmp_db = JSON.parse( IO.read(@conf_bl, encoding:'utf-8') ) 
-      unless tmp_db.nil?
-        #{fieldx: {dbs: [file_name,...], catergory: , note: X, id: X}}
-        #verify dbs filename exist
-        tmp_db.each do |fkey,fval|
-          if fval['dbs'].is_a?(Array)
-            for fn in fval['dbs']
-              if @bl_db[fn].nil?
-                @logger.error("You use a file name not exist in conf BL REPUTATION!!!")
-                return
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_bl, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          #{fieldx: {dbs: [file_name,...], catergory: , note: X, id: X}}
+          #verify dbs filename exist
+          tmp_db.each do |fkey,fval|
+            if fval['dbs'].is_a?(Array)
+              for fn in fval['dbs']
+                if @bl_db[fn].nil?
+                  @logger.error("You use a file name not exist in conf BL REPUTATION!!!")
+                  exit -1
+                end
               end
+            else
+              @logger.error("DBS field not exist in JSON conf BL REPUTATION!!")
+              exit -1
             end
-          else
-            @logger.error("DBS field not exist in JSON conf BL REPUTATION!!")
-            return
           end
+          @bl_rules = tmp_db
         end
-        @bl_rules = tmp_db
+        @logger.info("loading/refreshing Conf BL REPUTATION #{@bl_db}")
+      rescue
+        @logger.error("JSON CONF SIG -- CONF BL -- PARSE ERROR")
       end
-      @logger.info("loading/refreshing Conf BL REPUTATION #{@bl_db}")
     end
   end
   
   def load_conf_rules_sig
     if !File.exists?(@conf_rules_sig)
       @logger.warn("DB file read failure, stop loading", :path => @conf_rules_sig)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_rules_sig
     if not tmp_hash == @hash_conf_rules_sig
       @hash_conf_rules_sig = tmp_hash
-      @sig_db = JSON.parse( IO.read(@conf_rules_sig, encoding:'utf-8') ) 
-      @sig_db_array.clear
-      @sig_db_array_false.clear
-      keyF = Array.new
-      keyT = Array.new
-      #order sig_db by type (1 or 2)
-      if @sig_db['rules'].is_a?(Array)
-        tmp = *@sig_db['rules']
-        j=0
-        (0..@sig_db['rules'].length-1).each do |i|
-          @sig_db['rules'][i].each do |nkey,nval|
-            if nval['type'].is_a?(Numeric)
-              if nval['type'] == 2
-                #puts 'find at'+i.to_s+' -> '+j.to_s+' -- '+tmp[i-j].to_s
-                tmp=tmp.insert(-1,tmp.delete_at(i-j))
-                j=j+1
-                break
+      begin
+        @sig_db = JSON.parse( IO.read(@conf_rules_sig, encoding:'utf-8') ) 
+        @sig_db_array.clear
+        @sig_db_array_false.clear
+        keyF = Array.new
+        keyT = Array.new
+        #order sig_db by type (1 or 2)
+        if @sig_db['rules'].is_a?(Array)
+          tmp = *@sig_db['rules']
+          j=0
+          (0..@sig_db['rules'].length-1).each do |i|
+            @sig_db['rules'][i].each do |nkey,nval|
+              if nval['type'].is_a?(Numeric)
+                if nval['type'] == 2
+                  #puts 'find at'+i.to_s+' -> '+j.to_s+' -- '+tmp[i-j].to_s
+                  tmp=tmp.insert(-1,tmp.delete_at(i-j))
+                  j=j+1
+                  break
+                end
               end
             end
           end
-        end
-        #create Field True & false
-        @sig_db['rules'] = *tmp
-        for rule in tmp
+          #create Field True & false
+          @sig_db['rules'] = *tmp
+          for rule in tmp
+            keyF.clear
+            keyT.clear
+            rule.each do |nkey,nval|
+              if nval.has_key?('false')
+                keyF.push(nkey)
+              else
+                keyT.push(nkey)
+              end
+            end
+            @sig_db_array.push([*keyT])
+            @sig_db_array_false.push([*keyF])
+            @sig_db_array_len=@sig_db_array.length-1
+          end
           keyF.clear
           keyT.clear
-          rule.each do |nkey,nval|
-            if nval.has_key?('false')
-              keyF.push(nkey)
-            else
-              keyT.push(nkey)
-            end
-          end
-          @sig_db_array.push([*keyT])
-          @sig_db_array_false.push([*keyF])
-          @sig_db_array_len=@sig_db_array.length-1
         end
-        keyF.clear
-        keyT.clear
+        @logger.info("loading/refreshing SIG conf rules")
+      rescue
+          @logger.error("JSON CONF SIG -- SIG RULES -- PARSE ERROR")
       end
-      @logger.info("loading/refreshing SIG conf rules")
     end
   end
   def load_conf_rules_note
     if !File.exists?(@conf_rules_note)
       @logger.warn("DB file read failure, stop loading", :path => @conf_rules_note)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_rules_note
     if not tmp_hash == @hash_conf_rules_note
       @hash_conf_rules_note = tmp_hash
-      tmp_db = JSON.parse( IO.read(@conf_rules_note, encoding:'utf-8') ) 
-      unless tmp_db.nil?
-        unless tmp_db['rules'].nil?
-          if tmp_db['rules'].is_a?(Array)
-            @note_db = tmp_db['rules']
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_rules_note, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          unless tmp_db['rules'].nil?
+            if tmp_db['rules'].is_a?(Array)
+              @note_db = tmp_db['rules']
+            end
           end
         end
+        @logger.info("loading/refreshing NOTE conf rules")
+      rescue
+          @logger.error("JSON CONF SIG -- NOTE/SCORE RULES -- PARSE ERROR")
       end
-      @logger.info("loading/refreshing NOTE conf rules")
     end
   end
   def load_conf_ioc
     if !File.exists?(@conf_ioc)
       @logger.warn("DB file read failure, stop loading", :path => @conf_ioc)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_ioc
     if not tmp_hash == @hash_conf_ioc
       @hash_conf_ioc = tmp_hash
-      @ioc_rules = JSON.parse( IO.read(@conf_ioc, encoding:'utf-8') )
-      @logger.info("loading/refreshing IOC conf rules")
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_ioc, encoding:'utf-8') )
+        @ioc_rules = tmp_db
+        @logger.info("loading/refreshing IOC conf rules")
+      rescue
+          @logger.error("JSON CONF SIG -- IOC DB -- PARSE ERROR")
+      end
     end
   end
   def load_db_ioc
@@ -2053,7 +2303,7 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     @db_ioc.sort.each do |f|
       if !File.exists?(f)
         @logger.warn("DB file read failure, stop loading", :path => f)
-        return
+        exit -1
       end
       tmp_hash = Digest::SHA256.hexdigest File.read f
       if @hash_dbioc[f]
@@ -2071,8 +2321,12 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
     if change == true
       @ioc_db = {}
       @db_ioc.sort.each do |f|
-        db_tmp = JSON.parse( IO.read(f, encoding:'utf-8') )
-        @ioc_db = @ioc_db.merge(db_tmp) {|key, first, second| first.is_a?(Array) && second.is_a?(Array) ? first | second : second }
+        begin
+          db_tmp = JSON.parse( IO.read(f, encoding:'utf-8') )
+          @ioc_db = @ioc_db.merge(db_tmp) {|key, first, second| first.is_a?(Array) && second.is_a?(Array) ? first | second : second }
+        rescue
+          @logger.error("JSON CONF SIG -- IOC DB -- PARSE ERROR")
+        end
       end
       @logger.info("loading/refreshing DB IOC file(s)")
     end
@@ -2080,66 +2334,170 @@ class LogStash::Filters::Sig < LogStash::Filters::Base
   def load_conf_nv 
     if !File.exists?(@conf_nv)
       @logger.warn("DB file read failure, stop loading", :path => @conf_nv)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_nv
     if not tmp_hash == @hash_conf_nv
       @hash_conf_nv = tmp_hash
-      @nv_rules = JSON.parse( IO.read(@conf_nv, encoding:'utf-8') ) 
-      if @nv_rules['rules']
-        for rule in @nv_rules['rules']
-          if not @nv_db[rule.to_s]
-            @nv_db[rule.to_s] = []
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_nv, encoding:'utf-8') ) 
+        @nv_rules = tmp_db
+        if @nv_rules['rules']
+          for rule in @nv_rules['rules']
+            if not @nv_db[rule.to_s]
+              @nv_db[rule.to_s] = []
+            end
           end
         end
+        @logger.info("refreshing DB NewValue file")
+      rescue
+        @logger.error("JSON CONF SIG -- CONF NV -- PARSE ERROR")
       end
-      @logger.info("refreshing DB NewValue file")
     end
   end
   def save_db_nv
-    File.open(@db_nv,"w+") do |f|
-      f.write(JSON.pretty_generate(@nv_db))
+    begin
+      File.open(@db_nv,"w+") do |f|
+        f.write(JSON.pretty_generate(@nv_db))
+      end
+    rescue
+      @logger.error("JSON SAVE SIG -- SAVE NV-- PARSE/WRITE ERROR")
     end
   end
   def save_db_ioclocal
-    File.open(@file_save_localioc,"w+") do |f|
-      f.write(JSON.pretty_generate(@ioc_db_local))
+    begin
+      File.open(@file_save_localioc,"w+") do |f|
+        f.write(JSON.pretty_generate(@ioc_db_local))
+      end
+    rescue
+      @logger.error("JSON SAVE SIG -- SAVE IOC LOCAL -- PARSE/WRITE ERROR")
     end
   end
+  
+  def load_db_enr
+    if !File.exists?(@conf_enr)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_enr)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+    if not tmp_hash == @hash_conf_enr
+      @hash_conf_enr = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_enr, encoding:'utf-8') )
+        @db_enr = tmp_db
+        #open all db file
+        @db_enr.each do |ekey,eval|
+          ofile=eval["file"]
+          if !File.exists?(ofile)
+		    @logger.warn("DB file read failure, stop loading", :path => ofile)
+            exit -1
+          end
+          tmp_hash = Digest::SHA256.hexdigest File.read ofile
+          if not tmp_hash == @hash_dbfile_enr[ofile]
+            @hash_dbfile_enr[ofile] = tmp_hash
+            @db_enr[ekey]["db"] = JSON.parse( IO.read(ofile, encoding:'utf-8') )
+            sha1db=Digest::SHA1.hexdigest @db_enr[ekey]["db"].to_s
+            @hash_db_enr[ofile] = sha1db
+          end
+        end
+      rescue
+        @logger.error("JSON CONF SIG -- DB ENR -- PARSE ERROR")
+      end
+    end
+  end
+  def save_dbs_enr
+  #load db conf fp
+    @db_enr.each do |ekey,eval|
+      ofile=eval["file"]
+      if !File.exists?(ofile)
+	    @logger.warn("DB file read failure, stop loading", :path => ofile)
+        exit -1
+      end
+      tmp_sha1db = Digest::SHA1.hexdigest @db_enr[ekey]["db"].to_s
+      if not tmp_sha1db == @hash_db_enr[ofile]
+        File.open(ofile,"w+") do |f|
+          begin
+            f.write(JSON.pretty_generate(@db_enr[ekey]["db"]))
+          rescue
+            @logger.error("JSON SAVE SIG -- SAVE ENR -- PARSE/WRITE ERROR")
+          end
+        end
+        @hash_db_enr[ofile] = tmp_sha1db
+        tmp_hash = Digest::SHA256.hexdigest File.read ofile
+        @hash_dbfile_enr[ofile] = tmp_hash
+      end
+    end
+=begin
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+    if not tmp_hash == @hash_conf_enr
+      @hash_conf_enr = tmp_hash
+      db_enr_tmp = JSON.parse( IO.read(@conf_enr, encoding:'utf-8') )
+      #TODO verify if it works
+      @db_enr=@db_enr.deep_merge(db_enr_tmp)
+      File.open(@conf_enr,"w+") do |f|
+        f.write(JSON.pretty_generate(@db_enr))
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+      @hash_conf_enr = tmp_hash
+    else
+      File.open(@conf_enr,"w+") do |f|
+        f.write(JSON.pretty_generate(@db_enr))
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+      @hash_conf_enr = tmp_hash
+    end
+=end
+  end
+  
   def load_conf_fp
   #load db conf fp
     if !File.exists?(@conf_fp)
       @logger.warn("DB file read failure, stop loading", :path => @conf_fp)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @conf_fp
     if not tmp_hash == @hash_conf_fp
       @hash_conf_fp = tmp_hash
-      @fp_rules = JSON.parse( IO.read(@conf_fp, encoding:'utf-8') )
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_fp, encoding:'utf-8') )
+        @fp_rules = tmp_db
+      rescue
+        @logger.error("JSON CONF SIG -- CONF FP -- PARSE ERROR")
+      end
     end
   end
   def load_db_dropfp
     #load fp
     if !File.exists?(@db_dropfp)
       @logger.warn("DB file read failure, stop loading", :path => @db_dropfp)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @db_dropfp
     if not tmp_hash == @hash_dropfp
       @hash_dropfp = tmp_hash
-      @fp_db = JSON.parse( IO.read(@db_dropfp, encoding:'utf-8') )
+      begin
+        tmp_db = JSON.parse( IO.read(@db_dropfp, encoding:'utf-8') )
+        @fp_db = tmp_db
+      rescue
+        @logger.error("JSON CONF SIG -- DROPFP -- PARSE ERROR")
+      end
     end
   end
   def load_db_drop
   #load drop db
     if !File.exists?(@db_drop)
       @logger.warn("DB file read failure, stop loading", :path => @db_drop)
-      return
+      exit -1
     end
     tmp_hash = Digest::SHA256.hexdigest File.read @db_drop
     if not tmp_hash == @hash_dropdb
       @hash_dropdb = tmp_hash
-      @drop_db = JSON.parse( IO.read(@db_drop, encoding:'utf-8') )
+      begin
+        tmp_db = JSON.parse( IO.read(@db_drop, encoding:'utf-8') )
+        @drop_db = tmp_db
+      rescue
+        @logger.error("JSON CONF SIG -- DROPDB -- PARSE ERROR")
+      end
     end
   end
   #clean db special

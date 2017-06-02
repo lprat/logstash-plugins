@@ -1,12 +1,12 @@
 * * *
 
-## Update automatic:: <%= Time.now.strftime("%Y-%m-%dT%H:%M").to_s %>
+## Update automatic [source: <%= event.get("alert_source").to_s %>]: <%= tnow.strftime("%Y-%m-%dT%H:%M:%S:%L%z").to_s %>
 
 ### Tags: <%= event.get("tags").to_s %>
 
-### <%= event.get("fingerprint").to_s + " -> SCORE:" + event.get("sig_detected_note").to_s + " with ID(s): " + event.get("sig_detected_id").to_s %>
+### <%= event.get("fingerprint").to_s + " -> SCORE:" + event.get("sig_detected_note").to_s + " Count: 1 with ID(s): " + event.get("sig_detected_id").to_s %>
 
-Event: <%= JSON.pretty_generate(event.to_hash).gsub(/\P{ASCII}/, "?") %>
+Event in file: <%= "incident_detail-"+tnow.strftime("%Y-%m-%dT%H:%M:%S:%L").to_s+".json" %>
 
 #### Links to get informations on IP & Domain name
 

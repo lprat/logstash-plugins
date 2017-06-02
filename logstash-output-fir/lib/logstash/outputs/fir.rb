@@ -49,6 +49,7 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
   #   body_filter_prefix: 'string must match.. before content of field body filter' #optionnal
   #   body_filter_sufix: 'string must match.. after content of field body filter' #optionnal
   #   severity_add: 'name_field_in_event', # by example field sig_detected_note !!optionnal!!
+  #   count_filter: ' Count: '
   #   fields_create: {'name' => value, '' => value} # !!!REQUIRE FOR CREATE: "actor" = 6 & "category" & "confidentiality" & "detection" & "plan" & "is_starred" & "is_major" & "is_incident" & "concerned_business_lines"
   #   template_new_sujet: 'path', #optionnal
   #   template_new_body: 'path', #optionnal
@@ -228,7 +229,36 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
                 #verify if filter body present in incident DB
                 check_if_create=false
                 #if body match, break, is ok -> created and updated
-                break if incident[@body_field].include?(rule['body_filter_prefix'].to_s+event.get(rule['body_filter'].to_s).to_s+rule['body_filter_sufix'].to_s)
+                if incident[@body_field].include?(rule['body_filter_prefix'].to_s+event.get(rule['body_filter'].to_s).to_s+rule['body_filter_sufix'].to_s)
+                  break if rule['count_filter'].nil? or rule['count_filter'].empty?
+                  #count ++ 
+                  #replace rule['body_filter_prefix'].to_s+event.get(rule['body_filter'].to_s).to_s+rule['body_filter_sufix'].to_s+".*COUNT:"
+                  num_al=incident[@body_field].scan(/#{Regexp.escape(rule['body_filter_prefix'].to_s+event.get(rule['body_filter'].to_s).to_s+rule['body_filter_sufix'].to_s)}.*#{Regexp.escape(rule['count_filter'].to_s)}(\d+)/).last
+                  if num_al.nil?
+                    break
+                  else
+                    if num_al.is_a?(Array) and not num_al.empty?
+                      num_al = num_al.first.to_i + 1
+                      incident[@body_field] = incident[@body_field].gsub(/(#{Regexp.escape(rule['body_filter_prefix'].to_s+event.get(rule['body_filter'].to_s).to_s+rule['body_filter_sufix'].to_s)}.*#{Regexp.escape(rule['count_filter'].to_s)})(\d+)/, '\1'+num_al.to_s)
+                    else
+                      break
+                    end
+                  end
+                  url = @url_api_fir + "incidents/" + incident["id"].to_s
+                  begin
+                    response = @client.patch(url, :body => incident.to_json, :headers => @headers)
+                    if response.code < 200 and response.code > 299
+                      log_failure(
+                        "Encountered non-200 HTTP code #{200}",
+                        :response_code => response.code,
+                        :url => url,
+                        :event => event)
+                    end
+                  rescue
+                    @logger.warn("ERROR SEND:", :string => body.to_json)
+                  end
+                  break
+                end
                 #if body no match, then update
                 #UPDATE
                 sleep(1) until @token_create
@@ -260,6 +290,15 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
                       :response_code => response.code,
                       :url => url,
                       :event => event)
+                  else
+                    begin
+                      url = @url_api_fir+"files/"+incident["id"].to_s+"/upload"
+                      bodyfile={"files" => [{"content" => JSON.pretty_generate(event.to_hash),"description" => "Incident details","filename" => "incident_detail-"+tnow.strftime("%Y-%m-%dT%H:%M:%S:%L").to_s+".json"}]}
+                      response = @client.post(url, :body => bodyfile.to_json, :headers => @headers)
+                      @logger.info("Upload file content incident: ", :string => response.body)
+                    rescue
+                      @logger.warn("Upload file content incident: ERROR.", :string => response.body)
+                    end
                   end
                 rescue
                   @logger.warn("ERROR SEND:", :string => body.to_json)
@@ -308,7 +347,15 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
                     begin
                       add_inc = JSON.parse(response.body)
                       (@incidents_db["results"] ||= []) << add_inc
-                    rescue JSON::ParserError => e
+                      begin
+                        url = @url_api_fir+"files/"+add_inc["id"].to_s+"/upload"
+                        bodyfile={"files" => [{"content" => JSON.pretty_generate(event.to_hash),"description" => "Incident details","filename" => "incident_detail-"+tnow.strftime("%Y-%m-%dT%H:%M:%S:%L").to_s+".json"}]}
+                        response = @client.post(url, :body => bodyfile.to_json, :headers => @headers)
+                        @logger.info("Upload file content incident: ", :string => response.body)
+                      rescue
+                        @logger.warn("Upload file content incident: ERROR.", :string => response.body)
+                      end
+                    rescue
                       @logger.warn("JSON CMD ERROR PARSE:", :string => response.body)
                     end
                   else
@@ -347,51 +394,55 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
     tmp_hash = Digest::SHA256.hexdigest File.read @conffile
     if not tmp_hash == @hash_file
       @hash_file = tmp_hash
-      tmp_conf = JSON.parse( IO.read(@conffile, encoding:'utf-8') ) 
-      unless tmp_conf.nil?
-        if tmp_conf['rules'].is_a?(Array)
-          for rule in tmp_conf['rules']
-            if not rule['template_new_sujet'].nil? and not rule['template_new_sujet'].empty? and !File.exists?(rule['template_new_sujet'].to_s)
-              @logger.error("Template in configuration file not exist", :path => rule['template_new_sujet'].to_s)
-              return
-            elsif not rule['template_new_sujet'].nil? and not rule['template_new_sujet'].empty?
-              rule['template_new_sujet'] = File.read(rule['template_new_sujet'].to_s)
+      begin
+        tmp_conf = JSON.parse( IO.read(@conffile, encoding:'utf-8') ) 
+        unless tmp_conf.nil?
+          if tmp_conf['rules'].is_a?(Array)
+            for rule in tmp_conf['rules']
+              if not rule['template_new_sujet'].nil? and not rule['template_new_sujet'].empty? and !File.exists?(rule['template_new_sujet'].to_s)
+                @logger.error("Template in configuration file not exist", :path => rule['template_new_sujet'].to_s)
+                return
+              elsif not rule['template_new_sujet'].nil? and not rule['template_new_sujet'].empty?
+                rule['template_new_sujet'] = File.read(rule['template_new_sujet'].to_s)
+              end
+              if not rule['template_new_body'].nil? and not rule['template_new_body'].empty? and !File.exists?(rule['template_new_body'].to_s)
+                @logger.error("Template in configuration file not exist", :path => rule['template_new_body'].to_s)
+                return
+              elsif not rule['template_new_body'].nil? and not rule['template_new_body'].empty?
+                rule['template_new_body'] = File.read(rule['template_new_body'].to_s)
+              end
+              if not rule['template_up_sujet'].nil? and not rule['template_up_sujet'].empty? and !File.exists?(rule['template_up_sujet'].to_s)
+                @logger.error("Template in configuration file not exist", :path => rule['template_up_sujet'].to_s)
+                return
+              elsif not rule['template_up_sujet'].nil? and not rule['template_up_sujet'].empty?
+                rule['template_up_sujet'] = File.read(rule['template_up_sujet'].to_s)
+              end
+              if not rule['template_up_body'].nil? and not rule['template_up_body'].empty? and !File.exists?(rule['template_up_body'].to_s)
+                @logger.error("Template in configuration file not exist", :path => rule['template_up_body'].to_s)
+                return
+              elsif not rule['template_up_body'].nil? and not rule['template_up_body'].empty?
+                rule['template_up_body'] = File.read(rule['template_up_body'].to_s)
+              end
+              if rule['subject_filter_prefix'].nil?
+                rule['subject_filter_prefix'] = ""
+              end
+              if rule['subject_filter_sufix'].nil?
+                rule['subject_filter_sufix'] = ""
+              end
+              if rule['body_filter_prefix'].nil?
+                rule['body_filter_prefix'] = ""
+              end
+              if rule['body_filter_sufix'].nil?
+                rule['body_filter_sufix'] = ""
+              end
             end
-            if not rule['template_new_body'].nil? and not rule['template_new_body'].empty? and !File.exists?(rule['template_new_body'].to_s)
-              @logger.error("Template in configuration file not exist", :path => rule['template_new_body'].to_s)
-              return
-            elsif not rule['template_new_body'].nil? and not rule['template_new_body'].empty?
-              rule['template_new_body'] = File.read(rule['template_new_body'].to_s)
-            end
-            if not rule['template_up_sujet'].nil? and not rule['template_up_sujet'].empty? and !File.exists?(rule['template_up_sujet'].to_s)
-              @logger.error("Template in configuration file not exist", :path => rule['template_up_sujet'].to_s)
-              return
-            elsif not rule['template_up_sujet'].nil? and not rule['template_up_sujet'].empty?
-              rule[template_up_sujet''] = File.read(rule['template_up_sujet'].to_s)
-            end
-            if not rule['template_up_body'].nil? and not rule['template_up_body'].empty? and !File.exists?(rule['template_up_body'].to_s)
-              @logger.error("Template in configuration file not exist", :path => rule['template_up_body'].to_s)
-              return
-            elsif not rule['template_up_body'].nil? and not rule['template_up_body'].empty?
-              rule['template_up_body'] = File.read(rule['template_up_body'].to_s)
-            end
-            if rule['subject_filter_prefix'].nil?
-              rule['subject_filter_prefix'] = ""
-            end
-            if rule['subject_filter_sufix'].nil?
-              rule['subject_filter_sufix'] = ""
-            end
-            if rule['body_filter_prefix'].nil?
-              rule['body_filter_prefix'] = ""
-            end
-            if rule['body_filter_sufix'].nil?
-              rule['body_filter_sufix'] = ""
-            end
+            @fir_conf = tmp_conf['rules']
           end
-          @fir_conf = tmp_conf['rules']
         end
+        @logger.info("refreshing DB FIR condition file")
+      rescue
+        @logger.error("JSON CONF FIR -- PARSE ERROR")
       end
-      @logger.info("refreshing DB FIR condition file")
     end
   end
   
@@ -405,6 +456,7 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
     stop_load = true
     incidents_db_tmp = {}
     first = true
+    error_load = false
     url = @url_api_fir+"incidents?format=json"
     while stop_load
       response = @client.get(url, :headers => @headers)
@@ -426,11 +478,13 @@ class LogStash::Outputs::Fir < LogStash::Outputs::Base
         else
           stop_load = false
         end
-      rescue JSON::ParserError => e
+      rescue
         @logger.warn("JSON CMD ERROR PARSE:", :string => response.body)
+        stop_load = false
+        error_load = true
       end
     end
-    @incidents_db = incidents_db_tmp
-    @logger.warn("INCIDENT DB LOADED")
+    @incidents_db = incidents_db_tmp unless error_load
+    @logger.warn("INCIDENT DB LOADED") unless error_load
   end
 end # class LogStash::Outputs::Example

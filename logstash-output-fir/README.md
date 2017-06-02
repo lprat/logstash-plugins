@@ -61,6 +61,7 @@ The file contains rules which give filter and filter near event, choice template
     "body_filter": "fingerprint",
     "body_filter_prefix": "",
     "body_filter_sufix": " -> SCORE",
+    "count_filter": " Count: ",
     "severity_add": "sig_detected_note", 
     "fields_create": {"actor": 6, "category": 26,"confidentiality": 0,"detection": 36, "plan": 37,"is_starred": false,"is_major": false,"is_incident": false,"concerned_business_lines": []},
     "template_new_sujet": "", 
@@ -81,6 +82,7 @@ Each element of rule:
 * body_filter [string]: When subject matched, then verify if description event contains same event. I use fingerprint field (Plugin logstash-filter-sig) for it. If it find then stop, is ok, else, update event FIR with new event for client/server subject. The search use "body == '*value_field_event*' " (body is field description in FIR)
 * body_filter_prefix [string]: For avoid error when match body_filter you can add prefix and change search by "body == '*prefix+value_field_event*' "
 * body_filter_sufix [string]: For avoid error when match body_filter you can add sufix and change search by "body == '*value_field_event+sufix*' "
+* count_filter [string]: For incriment count of number same alert receveive.
 * severity_add [string]: The name of field used for copy value in severity field of FIR event. If empty then set severity to 1
 * fields_create [hash]: contains information must need for create event in FIR
   * actor [numeric]: 1

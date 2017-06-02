@@ -1,0 +1,7 @@
+{"1": 
+	{
+		"file":"/etc/logstash/db/whois.json",
+		"db": {},
+		"prefix": "whois_info_", "filters": {"type": "squid", "src_ip": "^192\\.168\\.0\\.\\\\d+$"}, "link": ["domain_dst"], "if_empty": "WHOIS", "form_in_db": "$1$", "filter_insert": [], "filter_noinsert": []
+	}
+}
