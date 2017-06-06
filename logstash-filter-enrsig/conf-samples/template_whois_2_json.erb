@@ -1,0 +1,8 @@
+<%=
+hash_result = {}
+output_cmd = output_cmd.gsub(': null,', ': "",')
+output_cmd = output_cmd.gsub(': null', ': ""')
+output_cmd = output_cmd.gsub('=>', ':')
+hash_result = JSON.parse(output_cmd)
+hash_result
+%>

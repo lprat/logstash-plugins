@@ -1,5 +1,5 @@
 --- /usr/share/logstash/vendor/jruby/lib/ruby/shared/mkmf.rb	2017-04-28 18:11:45.000000000 +0000
-+++ /usr/share/logstash/vendor/jruby/lib/ruby/shared/mkmf.rb.ori	2017-06-02 14:31:42.325422414 +0000
++++ /usr/share/logstash/vendor/jruby/lib/ruby/shared/mkmf.rb.new	2017-06-02 14:31:42.325422414 +0000
 @@ -43,7 +43,8 @@
  RbConfig::MAKEFILE_CONFIG["CFLAGS"] += " $(cflags)"
  RbConfig::MAKEFILE_CONFIG["CPPFLAGS"] += " $(DEFS) $(cppflags)"
