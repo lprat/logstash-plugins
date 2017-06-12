@@ -1,4 +1,4 @@
 {
-  "WHOIS": {"value_format": ["[\.A-Z0-9_-]+"], "command_path": "/usr/local/bin/json-whois.py", "command_syntax": "$1$","result_parse": "/etc/logstash/db/template_whois_2_json.erb"},
-  "NBTSCAN": {"value_format": ["[0-9\.]+"], "command_path": "/usr/bin/nbtscan", "command_syntax": "$1$ -v -t 1000 -s \'|\'","result_parse": "/etc/logstash/db/template_nbtscan_2_json.erb"}
+  "WHOIS": {"value_format": ["[\\.A-Z0-9_-]+"], "command_path": "/usr/local/bin/json-whois.py", "command_syntax": "$1$","result_parse": "/etc/logstash/db/template_whois_2_json.erb"},
+  "NBTSCAN": {"value_format": ["[0-9\\.]+","[A-Z0-9\\-\\.\\:]+"], "command_path": "/usr/bin/nbtscan", "command_syntax": "$1$ -v -t 1000 -s \'|\'","result_parse": "/etc/logstash/db/template_nbtscan_2_json.erb"}
 }

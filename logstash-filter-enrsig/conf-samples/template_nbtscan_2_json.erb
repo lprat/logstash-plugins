@@ -1,23 +1,25 @@
 <%=
-hash_result={"group": "", "MAC": "", "netbiosname": ""}
+hash_result={}
 unless output_cmd.to_s.empty?
   output_cmd.each_line do |line|
-  ar_line=line.split("|")
-  if ar_line.length == 3
-    ar_line[2]=ar_line[2].to_s.gsub(/\n/,"")
-    ar_line[1]=ar_line[1].to_s.gsub(/\n/,"")
-    if ar_line[2] =~ /^[a-f0-9]{1}[a-f0-9]{1}[A-Z]$/
-      if ar_line[2] =~ /^[a-f0-9]{1}[a-f0-9]{1}[G]$/
-        hash_result['group']=ar_line[1]
-      elsif ar_line[2] =~ /^[a-f0-9]{1}[a-f0-9]{1}[U]$/
-        hash_result['netbiosname']=ar_line[1]
+    ar_line=line.split("|")
+    if ar_line.length == 3
+      ar_line[2]=ar_line[2].to_s.gsub(/\n/,"")
+      ar_line[1]=ar_line[1].to_s.gsub(/\n/,"")
+      if ar_line[2] =~ /^[a-f0-9]{1}[a-f0-9]{1}[A-Z]$/
+        if ar_line[2] =~ /^[a-f0-9]{1}[a-f0-9]{1}[G]$/
+          hash_result['group']=ar_line[1].strip
+        elsif ar_line[2] =~ /^[a-f0-9]{1}[a-f0-9]{1}[U]$/
+          hash_result['netbiosname']=ar_line[1].strip
+        else
+          hash_result[ar_line[2]]=ar_line[1]
+        end
       else
-        hash_result[ar_line[2]]=ar_line[1]
+        hash_result[ar_line[1]]=ar_line[2]
       end
-    else
-      hash_result[ar_line[1]]=ar_line[2]
     end
   end
 end
 hash_result
 %>
+

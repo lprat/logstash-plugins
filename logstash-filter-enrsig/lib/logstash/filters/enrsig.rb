@@ -56,15 +56,16 @@ class LogStash::Filters::Enrsig < LogStash::Filters::Base
       cnt_ea=0
       for request_cmd in event.get(@field_enr)
         if request_cmd.is_a?(Hash) and not request_cmd.empty?
-          unless @conf_enr[request_cmd.keys[0]].is_a?(Hash)
+          #verify if command in request, exist in db
+          if @conf_enr[request_cmd.keys[0]].is_a?(Hash)
             #verify if answer already present in db
             if not @cmd_db[request_cmd.keys[0]].is_a?(Hash) and @cmd_db[request_cmd.keys[0]][request_cmd[request_cmd.keys[0]]['name_in_db']].is_a?(Hash)
               #add info
               response[cnt_ea][request_cmd.keys[0]]['response']=@cmd_db[request_cmd.keys[0]][request_cmd[request_cmd.keys[0]]['name_in_db']]
             else
               #verify if field is present in event
-              next if request_cmd[request_cmd.keys[0]]['value_format'].length != request_cmd[request_cmd.keys[0]]['field'].length
-              syntax_cmd=@conf_enr[request_cmd.keys[0]][request_cmd[request_cmd.keys[0]]['command_syntax']].dup
+              next if @conf_enr[request_cmd.keys[0]]['value_format'].length != request_cmd[request_cmd.keys[0]]['field'].length
+              syntax_cmd=@conf_enr[request_cmd.keys[0]]['command_syntax'].dup
               #if field link not present, next!
               pnext=false
               cnt_e=1
@@ -77,21 +78,28 @@ class LogStash::Filters::Enrsig < LogStash::Filters::Base
                   value_e=event.get(flval.to_s)
                   pvf=cnt_e-1
                   #verify format (avoid vulnerability escape) || FILTER
-                  if value_e =~ /#{Regexp.escape(request_cmd[request_cmd.keys[0]]['value_format'][pvf])}/i
-                    syntax_cmd.gsub! '$'+cnt_e.to_s+'$', value_e
-                    cnt_e+=1
-                  else
-                    @logger.warn("Format of syntaxe command is bad with filter #{Regexp.escape(request_cmd[request_cmd.keys[0]]['value_format'][pvf])}", :cmd => value_e)
+                  begin
+                    if value_e =~ /#{@conf_enr[request_cmd.keys[0]]['value_format'][pvf]}/i
+                      syntax_cmd.gsub! '$'+cnt_e.to_s+'$', value_e
+                      cnt_e+=1
+                    else
+                      @logger.warn("Format of syntaxe command is bad with filter #{Regexp.escape(@conf_enr[request_cmd.keys[0]]['value_format'][pvf])}", :cmd => value_e)
+                    end
+                  rescue
+                      @logger.warn("Regexp error", :regexp => @conf_enr[request_cmd.keys[0]]['value_format'][pvf])
                   end
+
                 end
               end
               next if pnext
-              next if cnt_e != request_cmd[request_cmd.keys[0]]['field'].length or syntax_cmd =~ /\$\d+\$/
+              #verify if format valid is ok on all field
+              next if cnt_e != request_cmd[request_cmd.keys[0]]['field'].length+1 or syntax_cmd =~ /\$\d+\$/
               #run cmd
-              output_cmd = `#{@conf_enr[request_cmd.keys[0]][request_cmd[request_cmd.keys[0]]['command_path']]} #{syntax_cmd}`
+              output_cmd = `#{@conf_enr[request_cmd.keys[0]]['command_path']} #{syntax_cmd}`
               #transform "output_cmd" value to HASH with ERB
               begin
-                result=ERB.new(@conf_enr[request_cmd.keys[0]][request_cmd[request_cmd.keys[0]]['result_parse']]).result(binding)
+                result=ERB.new(@conf_enr[request_cmd.keys[0]]['template_erb']).result(binding)
+                result=JSON.parse result.gsub('=>', ':')
                 if result.is_a?(Hash)
                   #insert in response
                   response[cnt_ea][request_cmd.keys[0]]['response']=result
@@ -102,7 +110,7 @@ class LogStash::Filters::Enrsig < LogStash::Filters::Base
                   @logger.warn("Command and ERB dont create HASH result!!", :result => result)
                 end
               rescue
-                @logger.warn("ERB parse error", :result => output_cmd)
+                @logger.warn("ERB/JSON parse error", :result => output_cmd)
               end 
             end
             #finish (resend to origin)
@@ -131,6 +139,12 @@ class LogStash::Filters::Enrsig < LogStash::Filters::Base
         @conf_enr = tmp_enr
         @conf_enr.each do |k,v|
           @cmd_db[k]={} if @cmd_db[k].nil?
+          if File.file?(@conf_enr[k]['result_parse'].to_s)
+            @conf_enr[k]['template_erb']=File.read(@conf_enr[k]['result_parse'].to_s)
+          else
+            @logger.warn("Template parse for rules #{k.to_s} not find...", :path => @conf_enr[k]['result_parse'])
+            @conf_enr[k]['template_erb']=""
+          end
         end
       rescue
         @logger.error("JSON CONF ENR_SIG -- PARSE ERROR")
