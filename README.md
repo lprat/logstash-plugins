@@ -41,6 +41,10 @@ Logstash plugin Filter "EnrSig" can help you to enrich event with different sour
 ## logstash-output-fir
 Logstash plugin Output for send alert (created by filter sig) in FIR (Cert SG - https://github.com/certsocietegenerale/FIR) 
 
+## Architecture sample
+![alt text](https://github.com/lprat/logstash-plugins/raw/master/sample-architecture/Architecture-sample.png "Architecture sample")
+![alt text](https://github.com/lprat/logstash-plugins/raw/master/sample-architecture/Diagramme-archi.png "Diagramme architecture sample")
+
 ## Contact
 
 @ lionel.prat9 (at) gmail.com Ou cronos56 (at) yahoo.com
