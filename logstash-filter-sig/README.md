@@ -1,39 +1,46 @@
-# Logstash Plugin
+# Logstash Plugin Filter "SIG"
 
-Logstash plugin Filter "Sig" can help you to detect security threat in log by differents techniques:
-* Drop False positive and noise
-* Find new value in field
-* BL REPUTATION check
-* IOC extracted of MISP by exemple
-* SIG with some fonctionnality search
-  * Each rule have:
-    * a name: name of rule for report
-    * a id: id use for correlation and change note
-    * a score (note): give score to signature, use for trigger alert or no
-    * a type: two type, one (1) is primary signature and two (2) is second signature. Second signature match only if a primary signature has before matched.
-    * ModeFP: true if false positive signature
-    * extract (optionnal): use for extract data information which you are sure that threat, and put in IOC local database for detect in all next events.
-  * Each rule can to do multi search technique by event on field and value:
-    * Field present and Field not present
-    * Regexp
-    * Regexp not present
-    * motif: motif must Array type and contains all possibility match
-    * Compare value field with another value field (string or numeric -- operator: ==, <, >, !=)
-    * Check size of string (length) operator: ==, <, >, !=
-    * Check ipaddr (ex: 192.168.0.0/24) with operator: ==, !=
-    * Check numeric value with operator: ==, !=, <, >
-    * Check date value in relationship with time now + X, use operator: ==, <, >, !=
-    * Check date value if in hour, use operator: ==, <, >, !=
-    * Check date value if in day (number day, ex: 0==sunday,1==monday), use operator: ==, <, >, !=
-    * Check frequence on multi event
-      * use for brute force (ex: sig type 3times error auth in 60secondes, if detected not research before 3600 secondes)
-      * use for correlation multi source with field value common (ex: ip) on events but different event type (squid and antivirus) (ex: sig type one error/detect on each type)
-    * Check frequence on event second possibility use for correlation
-* By databases of reference (before make with ES data contains clean logs -- script include) (new version of my project AEE [https://github.com/lprat/AEE])
-  * Check size, check regexp data, uniq value (ex: uniq value can be @timestamp because change everytime)
-  * Check link/relationship between not uniq (value) fields (idea inspired by tool PicViz). Exemple on apache log page test.php return always 200 in all logs. The link/relationship val$
-* Note/Score functionnality for change score (up or down) of alert with correlation IOC/multi SIG/REF match
-* By frequence but create alert not defined reason, just know log loading up and not normaly. You can select frequence on specifique event by filters
+*Logstash plugin Filter "Sig" can help you to detect security threat in log by differents ways.*
+
+## Features
+
+* Drop first time False positive and noise events
+* Enrichissement event with database or/and send event to plugin enrsig for enrich event by active method (whois, ssl_check, nmap, ...)
+* Drop second time False positive and noise events (based on enrichissement informations)
+* Check new value in field
+* Check blacklist reputation
+* Check IOC in event (extracted on MISP)
+* Check signatures with some fonctionnality:
+  * Rule compisition:
+    * Name: name of rule for report
+    * ID: id use for correlate and change score
+    * Score (note): give score if matched (use score for triggered alert)
+    * Type: 2 types possibility, first is 'primary signature' and second is 'second signature'. Second signature match only if a primary signature matched before. 
+    * ModeFP: it's boolean variable for indicate if rule match 'false positive'
+    * extract (optional): use for extract data informations if you are sure that threat, and put in IOC local database for detect in all next events.
+    * Use multi-search techniques (you can use one or more techniques in one rule) by event on field and value:
+      * Check if field is present or field is not present
+      * Check Regexp if present or not present
+      * Check motif (Array or String)
+      * Compare value field against another value field (string or numeric -- operator: ==, <, >, !=)
+      * Check size (length) of string in field with operator: ==, <, >, !=
+      * Check ipaddr (ex: 192.168.0.0/24) in field with operator: ==, !=
+      * Check numeric value in field with operator: ==, !=, <, >
+      * Check date value in relationship with time now + X, with operator: ==, <, >, !=
+      * Check date value if in hour, use operator: ==, <, >, !=
+      * Check date value if in day (number day, ex: 0==sunday,1==monday), use operator: ==, <, >, !=
+      * Check frequence on multi event
+        * Can be used for brute force (ex: if 3 times auth error in 60 secondes,then don't research before 3600 secondes)
+        * Correlate multi-sources with same field value (ex: ip) on different events (ex: squid event IP DST == sysmon event IP DST) 
+      * Check frequence on event
+* Check event by compare with reference data (require to make reference database with ES when contains clean data) (it's new version of my project AEE [https://github.com/lprat/AEE])
+  * Check size, check regexp form value, check if unique or determined list value (ex: don't be @timestamp because change everytime)    
+  * Check link/relationship between not signle/determined list value of fields (idea inspired by tool PicViz [http://picviz.com/]). Exemple on apache log page test.php return always 200 in all logs. The link/relationship value/field is "uri_page(test.php)<->return_code(200)"
+* Analys matched rules for adapt score of alert
+* Fingerprint event according by rule for identify unique event & Drop fingerprint (false positive usage)
+* Check frequence on specifique event by filters. Alert not created on a specifique event, but it create new event.
+
+## Require
 
 This plugin use simhash for find around result and futur possibility check and correlation.
 
@@ -47,164 +54,190 @@ This plugin use simhash for find around result and futur possibility check and c
 4. env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/1.9 JRUBY_OPTS='-Xcext.enabled=true' /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/jruby/bin/gem build logstash-filter-sig.gemspec
 5. /usr/share/logstash/bin/logstash-plugin install logstash-filter-sig-3.0.0.gem 
 
-** You welcome to contribute (report bug, new functionality, ...)! **
-
-** Possibility you meet bug, I recently ported on logstash 5.x !! ** 
-
-This is a plugin for [Logstash](https://github.com/elastic/logstash).
-
-It is fully free and fully open source. The license is Apache 2.0, meaning you are pretty much free to use it however you want in whatever way.
-
-## Contact
-Lionel PRAT lionel.prat9 (at) gmail.com or cronos56 (at) yahoo.com
 
 ## Let's start with docker
-Dockerfile
-```
-FROM logstash
-MAINTAINER Lionel PRAT <lionel.prat9@gmail.com>
 
-RUN apt-get update && apt-get install -y vim nano
-RUN mkdir -p /opt/logstash-plugins/ && mkdir /etc/logstash/db
-ADD logstash-filter-sig /opt/logstash-plugins/
-RUN cp /opt/logstash-plugins/logstash-filter-sig/conf-samples/* /etc/logstash/db/ && chown logstash.logstash -R /etc/logstash/db/
-RUN cp /opt/logstash-plugins/logstash-filter-sig/need/mkmf.rb /usr/share/logstash/vendor/jruby/lib/ruby/shared/mkmf.rb 
-RUN cd /opt/logstash-plugins/logstash-filter-sig && curl -sSL https://get.rvm.io | bash && /usr/local/rvm/bin/rvm install 1.9.3-dev && env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/1.9 JRUBY_OPTS='-Xcext.enabled=true' /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/bundle/jruby/1.9/bin/bundle install && env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/1.9 JRUBY_OPTS='-Xcext.enabled=true' /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/jruby/bin/gem build logstash-filter-sig.gemspec
-RUN /usr/share/logstash/bin/logstash-plugin install logstash-filter-sig-3.0.0.gem
-```
+*DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
+
+Enter in directory "docker" and edit file "docker-compose.yml" :
+* volumes: change volume source (on host) with your logstash path configuration
+
+Before run docker composer, verify configuration logstash is valid. Verify configuration plugin logstash is valid too (use sample configuration in plugins directory for help you).
+
+Run docker-compose
 
 ## Main Configuration (logstash-filter.conf)
-** Refresh DB : The plugin use some files configurations, you can change it during run. The plugin get change and apply all refresh time. You can use config/db file with git system... ** 
-** Functions are in order to works/process **
-* Disable check techniques : use for disable function check
-  * no_check => "sig_no_apply_all" : add in event a field name "sig_no_apply_all" for no use all check on it
-  * disable_drop => false :  if turn to true, function "drop" will disable
-  * disable_fp => false :  if turn to true, function "fingerprint & drop fingerprint" will disable
-  * disable_nv => false :  if turn to true, function "new value" will disable
-  * disable_ioc => false :  if turn to true, function "ioc" will disable
-  * disable_sig => false :  if turn to true, function "signature" will disable
-  * disable_ref => false :  if turn to true, function "reference" will disable
-  * disable_freq => false :  if turn to true, function "frequence" will disable
-  * disable_note => false :  if turn to true, function "note/score" will disable
+**Refresh DB : The plugin use some files configurations, files are reload every hour (default). You can use config/db files with git update...** 
 
-* Drop function : use drop function to drop noise and event you don't want analysis
-  * noapply_sig_dropdb => "sig_no_apply_dropdb" : add in event a field name "sig_no_apply_dropdb" for no use this check on it
+Configuration of each features:
+* Disable check features: use for disable feature check
+  * no_check => "sig_no_apply_all" : add in event a field name "sig_no_apply_all" for disable all checking
+  * disable_drop => false :  if you turn to true, feature "drop" is disable
+  * disable_enr => false :  if you turn to true, feature "enrichissement" is disable
+  * disable_fp => false :  if you turn to true, feature "fingerprint & drop fingerprint" is disable
+  * disable_nv => false :  if you turn to true, feature "new value" is disable
+  * disable_bl => false :  if you turn to true, feature "blacklist" is disable
+  * disable_ioc => false :  if you turn to true, feature "ioc" is disable
+  * disable_sig => false :  if you turn to true, feature "signature" is disable
+  * disable_ref => false :  if you turn to true, feature "reference" is disable
+  * disable_freq => false :  if you turn to true, feature "frequence" is disable
+  * disable_note => false :  if you turn to true, feature "score" is disable
+
+* Drop feature: drop false positive and noise events (used before and after enrichissement feature)
+  * noapply_sig_dropdb => "sig_no_apply_dropdb" : add in event a field name "sig_no_apply_dropdb" for disable checking
   * db_drop => "/etc/logstash/db/drop-db.json" : path of file drop-db.json (see below for more information)
-  * refresh_interval_dropdb => 3600 : delay interval (in second) to refresh db_drop
+  * refresh_interval_dropdb => 3600 : delay interval (in second) to reload db_drop
 
-* New value : use for check new value on event specified field
+* Enrichissement feature: Enrichissement event with database or/and send event to plugin enrsig for enrich event by active method (whois, ssl_check, nmap, ...)
+  * noapply_sig_enr => "sig_no_apply_enr" : add in event a field name "sig_no_apply_enr" for disable checking
+  * conf_enr => "/etc/logstash/db/enr.json" : path of file enr.json (see below for more information)
+  * refresh_interval_enr => 3600 : delay interval (in second) to reload "enr"
+  * field_enr => "request_enrichiment": field name where to add ask for logstash enrsig plugin (active check).
+  * enr_tag_response => "ENR_RETURN_TO_JOHN": add tag to event for identify who is origin of resquest, and resend the result to good server
+  
+* New value feature : check new value in field
   * conf_nv => "/etc/logstash/db/new.json" : path of file new.json (see below for more information)
   * db_nv => "/etc/logstash/db/new-save.json" : path of file new-save.json (see below for more information)
-  * noapply_sig_nv => "sig_no_apply_nv" : add in event a field name "sig_no_apply_nv" for no use this check on it
-  * refresh_interval_confnv => 3600 : delay interval (in second) to refresh conf_nv
-  * save_interval_dbnv => 3600 : delay interval (in second) to save db_nv 
-  * target_nv => "new_value_" : prefix value if new value detected, create field with name "new_value_FIELDX" contains "new value" value
+  * noapply_sig_nv => "sig_no_apply_nv" : add in event a field name "sig_no_apply_nv" for disable checking
+  * refresh_interval_confnv => 3600 : delay interval (in second) to reaload "conf_nv"
+  * save_interval_dbnv => 3600 : delay interval (in second) to save "db_nv"
+  * target_nv => "new_value_" : prefix value of name field created if new value detected
   
-* BL REPUTATION : use for check ip reputation in event field
+* BL (Black list) REPUTATION feature: check ip reputation
   * conf_bl => "/etc/logstash/db/bl_conf.json" : path of file bl_conf.json (see below for more information)
   * file_bl => [Array type] ["/etc/logstash/db/firehol_level1.netset","/etc/logstash/db/firehol_level2.netset","/etc/logstash/db/firehol_level3.netset","/etc/logstash/db/firehol_level4.netset","/etc/logstash/db/firehol_webserver.netset","/etc/logstash/db/firehol_webclient.netset","/etc/logstash/db/firehol_abusers_30d.netset","/etc/logstash/db/firehol_anonymous.netset","/etc/logstash/db/firehol_proxies.netset"] : path of files contains ip reputation
     * You can use firehol BL: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webserver.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webclient.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_anonymous.netset,https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_proxies.netset
-  * noapply_sig_bl => "sig_no_apply_bl" : add in event a field name "sig_no_apply_bl" for no use this check on it
-  * refresh_interval_confbl => 3600 : delay interval (in second) to refresh conf_bl & db_bl (file bl)
+  * noapply_sig_bl => "sig_no_apply_bl" : add in event a field name "sig_no_apply_bl" for disable checking
+  * refresh_interval_confbl => 3600 : delay interval (in second) to reload conf_bl & db_bl (file bl)
   * targetname_bl => "bl_detected_category" : field name to save value of category if ip reputation found
 
-* IOC : use for check IOC in event
+* IOC feature: check IOC (IP/URL/HASH/EMAIL/ ...)
   * db_ioc => ["/etc/logstash/db/ioc.json", "/etc/logstash/db/ioc_local.json"] : Array contains path of files db (ioc_local.json => created by signature function [file_save_localioc], ioc.json) (see below for more information)
   * conf_ioc => "/etc/logstash/db/ioc_conf.json" : path of file ioc_conf.json (see below for more information)
-  * target_ioc => "ioc_detected" : name of field where you save IOC detected
-  * targetnum_ioc => "ioc_detected_count" : name of field where you save count of IOC detected
-  * targetname_ioc => "ioc_detected_name" : name of field where you save IOC name detected
-  * refresh_interval_dbioc => 3600 : delay interval (in second) to refresh conf_ioc & db_ioc
-  * noapply_ioc => "sig_no_apply_ioc" : add in event a field name "sig_no_apply_ioc" for no use this check on it
+  * target_ioc => "ioc_detected" : name of field where you save detected IOC
+  * targetnum_ioc => "ioc_detected_count" : name of field where you save count of detected IOC
+  * targetname_ioc => "ioc_detected_name" : name of field where you save detected IOC name
+  * refresh_interval_dbioc => 3600 : delay interval (in second) to reload conf_ioc & db_ioc
+  * noapply_ioc => "sig_no_apply_ioc" : add in event a field name "sig_no_apply_ioc" for disable checking
   
-* Signature : use for check complexe signature on event
+* Signature feature: check signatures
   * conf_rules_sig => "/etc/logstash/db/sig.json" : path of file sig.json (see below for more information)
   * file_save_localioc => "/etc/logstash/db/ioc_local.json" : path of file ioc_local.json (see below for more information)
   * target_sig => "sig_detected" : name of field where you save Rules detected
   * targetnum_sig => "sig_detected_count" : name of field where you save count of rules detected
   * targetname_sig => "sig_detected_name" : name of field where you save name of rules detected
   * refresh_interval_confrules => 3600 : delay interval (in second) to refresh file_save_localioc & conf_rules_sig
-  * noapply_sig_rules => "sig_no_apply_rules" : add in event a field name "sig_no_apply_rules" for no use this check on it
-  * check_stop => false : fix to true if you can stop check sig after one found
+  * noapply_sig_rules => "sig_no_apply_rules" : add in event a field name "sig_no_apply_rules" for disable checking
+  * check_stop => false : turn to true if you want stop checking after first found
   
-* REFERENCE (old ANOMALIE) : use for verify event is included in reference database
+* REFERENCE (old ANOMALIE) feature: Check event by compare with reference data
   * conf_ref => "/etc/logstash/db/conf_ref.json" : path of file conf_ref.json (see below for more information)
   * db_ref => "/etc/logstash/db/reference.json" : path of file reference.json (see below for more information)
   * db_pattern => "/etc/logstash/db/pattern.db" : path of file pattern.db (see below for more information)
-  * refresh_interval_dbref => 3600 : delay interval (in second) to refresh db_ref & db_pattern & conf_ref
-  * noapply_ref => "sig_no_apply_ref" : add in event a field name "sig_no_apply_ref" for no use this check on it
+  * refresh_interval_dbref => 3600 : delay interval (in second) to reload db_ref & db_pattern & conf_ref
+  * noapply_ref => "sig_no_apply_ref" : add in event a field name "sig_no_apply_ref" for disable checking
   * target_ref => "ref_detected" : name of field where you save detected differences between event and reference
-  * targetnum_ref => "ref_detected_count" : name of field where you save count all detected differences between event and reference
+  * targetnum_ref => "ref_detected_count" : name of field where you save count detected differences between event and reference
   * targetname_ref => "ref_detected_name" : name of field where you save detected name of difference between event and reference
-  * ref_aroundfloat => 0.5 : around score if not integer (float result)
-  * ref_stop_after_firstffind => true : fix to false if you can continue to check reference after one rule found
+  * ref_aroundfloat => 0.5 : round the score if not integer (float result)
+  * ref_stop_after_firstffind => true : turn to false if you want continue to checking after first difference found
   
-* SIG & IOC & REF configuration common (SCORE/NOTE function) : use score function for change value of score if you match multi rule (IOC/REF/SIG ==> correlation between matched) 
-  * targetnote => "sig_detected_note" : name of field where you save score issued of IOC/SIG/REF/SCORE function
-  * targetid => "sig_detected_id" : name of field where you save ID rule issued of IOC/SIG/REF function
+* Score feature: change value of score if event is matched by several features
+  * targetnote => "sig_detected_note" : name of field where you saved score provieded by features: IOC/SIG/REF/BL...
+  * targetid => "sig_detected_id" : name of field where you saved ID rule provieded by features: IOC/SIG/REF/BL...
   * conf_rules_note => "/etc/logstash/db/note.json" : path of file note.json (see below for more information)
   
-* Fingerprint function: use for limit information on alert, first detect add fingerprint value and 'first' tag, after all others add tag 'info' (information complementary). You can process for make alert with first (send to incident platform) and put all 'info' in ES for read for more context information.
-  * noapply_sig_dropfp => "sig_no_apply_dropfp" : add in event a field name "sig_no_apply_dropfp" for no use this check on it
+* Fingerprint feature: Limit alert sent. When first detected, make fingerprint value and tag 'first'. After all others events with same fingerprint is tagged 'info' (information complementary).
+  * noapply_sig_dropfp => "sig_no_apply_dropfp" : add in event a field name "sig_no_apply_dropfp" for disable checking
   * conf_fp => "/etc/logstash/db/fingerprint_conf.json" : path of file fingerprint_conf.json (see below for more information)
   * db_dropfp => "/etc/logstash/db/drop-fp.json" : path of file drop-fp.json (see below for more information)
-  * select_fp => "tags" : name field for select/filter type, relationship with fingerprint_conf.json. Exemple: event['tags']="squid" --> (fingerprint_conf.json->>) {"squid":{"fields":[....],...}}
+  * select_fp => "tags" : name field for select/filter type event, relationship with fingerprint_conf.json. Exemple: event['tags']="squid" --> (fingerprint_conf.json->>) {"squid":{"fields":[....],...}}
   * target_fp => "fingerprint" : name field where you save fingerprint value
-  * tag_name_first => "first_alert" : value name of tag for unique event alert when first time to lookup
-  * tag_name_after => "info_comp" : value name of tag for unique event alert when not first time to lookup
-  * target_tag_fp => "tags" : field name where you save the value tag (first or complementary)
-  * refresh_interval_conffp => 3600 : delay interval (in second) to refresh db_dropfp and conf_fp
+  * tag_name_first => "first_alert" : tag value for first event alert
+  * tag_name_after => "info_comp" : tag value for everything after the first alert
+  * target_tag_fp => "tags" : field name where you save tag value
+  * refresh_interval_conffp => 3600 : delay interval (in second) to reload db_dropfp and conf_fp
 
-* FREQUENCE : use for detect anormaly frequence increase on event flux
+* FREQUENCE feature: detect anormaly frequence increase on event flux
   * conf_freq => "/etc/logstash/db/conf_freq.json" : path of file conf_freq.json (see below for more information)
-  * refresh_interval_freqrules => 3600 : delay interval (in second) to refresh conf_freq
-  * noapply_freq => "sig_no_apply_freq" : add in event a field name "sig_no_apply_freq" for no use this check on it
+  * refresh_interval_freqrules => 3600 : delay interval (in second) to reload conf_freq
+  * noapply_freq => "sig_no_apply_freq" : add in event a field name "sig_no_apply_freq" for disable checking
   
 ## Files Configuration
-** Check in folder conf-samples and scripts-create-db **
-### DROP FIRST
-The file drop-db.json contains rule for drop event, that you don't want analysis or noise.
-** This file is a Json format **
-```
+**Check in folder conf-samples and scripts-create-db**
+
+### DROP Feature
+#### drop-db.json
+The file drop-db.json contains rule for drop noise/false positive event.
+
+```json
 {"dst_domain": "^google.com$|^mydomain.ext$", "dst_ip": "10.0.0.\\d+"}
 ```
-The json key is field name to check in event (event['field'], and value must regexp to check on it. If regexp match then event is dropped.
 
-### New Value
-#### new-save.json
-The file is auto generated by plugins, but you must created for first time with contains '{}' (Json empty). In time, contains all informations of field selected.
-You can restart to 0 by recreate file.
-** This file is a Json format **
-#### new.json
-The file contains rules which indicates what field selected for check new value.
-** This file is a Json format **
+This configuration drop all event with 'dst_domain' to 'google.com' or 'mydomain.ext', as 'dst-ip' to '10.0.0.0/24'.
+
+The json key is field name to check in event (event['field']), and the value is a regexp to check on field. If regexp matched then event is dropped.
+
+### Enrichissement feature
+#### enr.json
+
+You have 2 choices:
+ - Use database local (passive enrichissement)
+ - Use active enrichissement (command, whois, ssl check, ...) with enrsig. Use enrsig on other server for avoid slow down. In global configuration, if field "enr_tag_response" or "field_enr" exist then pass direct to output and send event to server enrsig. This one resend event to you with result in your input logstash.
+```json
+{"1": 
+	{
+		"file":"/etc/logstash/db/whois.json",
+		"db": {},
+		"prefix": "whois_info_", "filters": {"type": "squid", "src_ip": "^192\\.168\\.0\\.\\\\d+$"}, "link": ["domain_dst"], "if_empty": "WHOIS", "form_in_db": "$1$", "filter_insert": [], "filter_noinsert": []
+	}
+}
 ```
+
+This configuration have one rule with ID "1". This rule load local database (whois.json) in db key. 
+If event match to "filters" (type == squid and src_ip field matched on regexp "^192\\.168\\.0\\.\\\\d+$") then check in "db": if value contained in "link" name field exist (value of event['domain_dst'] exist in "db") then add information in event field with "prefix"("whois_info_").
+                                                                                                          else send request to enrsig plugin (use globale config logstash to redirect request to server logstash with enrsig plugin).
+                                                  
+### New Value feature
+#### new-save.json
+The file is auto generated by plugin, but you create file with contains '{}' before run plugin for first time. 
+The plugin save information extracted in this file and can reload after restart.
+
+If you want restart at begin, just remove file and recreate json empty '{}'.
+
+#### new.json
+The file contains a key "rules", value indicate selected fields for check new values.
+
+
+```json
 {"rules": ["dst_host","user_agent"]}
 ```
-Above, the rules selectes field with name "dst_host" for create verification on it, and another verification on field "user_agent".
+This configuration check new value on field "dst_host" and  "user_agent".
 
 ### IP REPUTATION
 #### bl_conf.json
-The file contains rules which indicates what field selected for check with list ip reputation. Field must be a IP format.
-** This file is a Json format **
-```
+The first key of json indicates field selected to check ip reputation list (give path of each files db in 'dbs').
+
+```json
 {"fieldx": {'dbs':[file_name,file_name2,...], id: '180XX', 'note': 1, 'category': "malware"}}
 ```
-Use id plage different of another technique (ioc, sig, ref, ...).
-Note: between 1 and 4.
-Category: indicate category contains in file_name (malware, webserveur attack, proxies, ...)
-dbs: must contains list file name configured in main conf 'file_bl'
+* ID must be unique (ID of rule). 
+* Note (score): between 1 and 4.
+* Category: indicate category contained in dbs files (malware, webserveur attack, proxies, ...)
+* dbs: contains path of file db (must be too in main conf 'file_bl' in "logstash-filter.conf")
 
 ### IOC
 #### ioc_conf.json
-This file contains rules which explain on which field use each IOC. 
-A rule is hash composed of 4 elements:
-* First key: IOC name in DB with value include in event key (ex: "ioc_hostname":["_host"] want to do => check IOC hostname on event with field name *_host* as event['dst_hostname'] ... )
-* Second Key Name repeat First key name with add +'_downcase', it's value can be true or false. True verify IOC without case (AbC == abc) and False opposite (AbC != abc)
-* Third key name repeat again and add +'iocnote', it's value is score if IOC detected
-* Fourth key name repeat again! and add +'iocid', it's value is ID of rule for use after in NOTE function by example.
-** This file is a Json format **
-```
+This file contains rules to check IOC in event.
+
+Whole of rules is hash, one type IOC (ex: URL) is configured by 4 keys:
+* First: Key is IOC name in DB, and value is name of field in event to check IOC
+  * ex: "ioc_hostname":["_host"] => check IOC hostname on field name *_host* (wildcard indicate all field name contains '_host' by exemple event['dst_hostname'] are checked)
+* Second: Key is same name than first key with '_downcase' at end, it's value can be true or false. True verify IOC without case (AbC == abc) and False opposite (AbC != abc)
+* Third: key is same name than first key with 'iocnote' at end, it's value is score if IOC detected.
+* Fourth key is same name than first key with 'iocid' at end, it's value is ID of rule for use after in SCORE feature by example.
+
+```json
 {
 "ioc_hostname":["_host"], "ioc_hostname_downcase":true, "ioc_hostname_iocnote":2, "ioc_hostname_iocid":1001,
 "ioc_domain":["_domain"], "ioc_domain_downcase":true, "ioc_domain_iocnote":2, "ioc_domain_iocid":1002,
@@ -217,17 +250,17 @@ A rule is hash composed of 4 elements:
 ```
 
 #### ioc_local.json
-This file is generated (JSON format) by plugin with use function signature and parameter 'extract'.
-** For first time, you create file empty (echo '{}' > ioc_local.json) ** 
+This file is generated by plugin by featuring signature with parameter 'extract'.
+**Before start for irst time, you create file empty (echo '{}' > ioc_local.json)** 
 
 #### Script to generate ioc.json
-Use script ioc_create.sh for create ioc.json file (in path: "/etc/logstash/db/") from MISP db.
-** Require Pymisp (https://github.com/MISP/PyMISP), wget (for download alexa db), misp2json4ioc.py (include in folder scripts), blacklist.json (include in conf-samples) **
+Use script ioc_create.sh for generate ioc.json file (in path: "/etc/logstash/db/") from MISP database.
+**Require Pymisp (https://github.com/MISP/PyMISP), wget (for download alexa db), misp2json4ioc.py (include in folder scripts), blacklist.json (include in conf-samples)**
 
 ##### blacklist.json
-This file used for avoid to add IOC create more false positive.
-** This file is a Json format **
-```
+Drop IOC that trigger false positive.
+
+```json
 {
 "ioc_ip":["(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|10\\.\\d+\\.\\d+\\.\\d+|192\\.168\\.\\d+\\.\\d+|172\\.([1-2][0-9]|0|30|31)\\.\\d+\\.\\d+|255\\.255\\.255\\.\\d+)"], 
 "email-attachment":[],
@@ -243,39 +276,39 @@ This file used for avoid to add IOC create more false positive.
 ```
 
 ### SIGNATURES
-The sig.json file contains rules to check in event.
-THe first key name is 'rules', the value is array contains all rules.
-Each rule is Hash composed of multi element optionnal and mandatory:
-* Level 1 : all first key in hash is name of Field {fieldX:{},fieldY:{},...} with techniques of search, for rule match, you must valid match on all technique in all field!
-  * In one field (only) you must add information (in its hash): 
-    * "id": X => X is value interger of key id, give unique id number which identify rule
-    * "name": "String" => String is a value string which give name to rule
-    * "type": value 1 or 2 => use 1 for search rule in event without another rule before find, and use 2 for search only if a rule is found before.
-    * "note": 1 to X => use for give the score if rule match
-    * "modeFP": true or false => use for drop event if rule match (false positive mode)
-    * "extract": {"field": "ioc_x"} => ** it's optionnal add ** , use for extract value of field indicated in hash key and put in ioc database local in ioc_X selected in value of hash.
-    * Technique frequence & correlation in different event:
-       * "freq_field": [fieldx,fieldz,...] => the value is array contains name of field of event relationship between anoter event 
-       * "freq_delay": x in second => it's time delay between first event and last event (if freq_count == 3 then first 1 and last 3)
-       * "freq_count": y => the count of event you must see for match
-       * "freq_resettime": z in second => the time to wait for reseach new frequence when you before detected
-       * "correlate_change_fieldvalue": [] => indicated field name in array, the value of field must be different for each event match
-  * Techniques of search
-    * "motif": ["X","Z"] => use for search motif in field. Field must include one element in array. If field contains X then techniques match!
-    * "false": {} => flase contais empty hash. use for indicate than field name not be present in event
-    * "regexp": ["^\\d+$","..."] => value is array contains all regexp, for match technique each regexp must matched. 
-    * "notregexp": [] => value is array contains all regexp, for match technique each regexp must ** not ** matched.
-    * "date": {'egal'|'inf'|'sup'|'diff': x in second} => use for field contains date value, check if date is (time.now)-x  of value with operator (<,>,!=,==) 
-    * "hour": {'egal'|'inf'|'sup'|'diff': 0 to 23} => use for field contains date value, check if hour is hour of value with operator (<,>,!=,==)
-    * "day": {'egal'|'inf'|'sup'|'diff': 0 to 6} => use for field contains date value , check if day is day of value with operator (<,>,!=,==)
-    * "ipaddr": {'egal'|'diff']: ipaddr or subnet} => use on field contains ip addr compare if value (by operator != or ==) to value of hash
-    * "sizeope" : {['egal'|'inf'|'sup'|'diff']: x} => use on field contains string and compare size of string with hash operator for value hash.
-    * "numop" : {['egal'|'inf'|'sup'|'diff']: x} => use on field contains interger and compare number with hash operator for value hash.
-    * "compope": {"fieldz": {['egal'|'inf'|'sup'|'diff']: "string"/numeric}} => use for compare two field in same event with same value type
-    * ** !! two another techniques present in information party above **
+#### sig.json
+The sig.json file contains rules of signature to check in event.
 
-** This file is a Json format  -- example not use all possibility of sig **
-```
+The first key name is 'rules', the value is an array contains all signatures.
+Each signature is hash format composed of multi key/value:
+* Level 1 : all name key at first level is name of Field to check ({fieldX:{},fieldY:{},...})
+  * Only one key/value pair must be used to add the signature information. The key/value signature information are: 
+    * "id": (Integer) value is unique ID number of signature
+    * "name": (String) value is name of signature
+    * "type": (Integer 1 or 2) value is 1 if check signature on event without prerequisites, and value is 2 if you check on event only if another signature found before.
+    * "note": (Integer) value is score of signature
+    * "modeFP": (Boolean) if value is true, and signature matched then event is dropped (false positive mode)
+    * "extract": (Hash -- Optional) (ex: {"field": "ioc_x"}) extract value of field indicated in hash key and put value in ioc local database in field 'ioc_X' indicated in configuration "extract".
+  * Check frequence & correlation in different event:
+    * "freq_field": (Array) value is array contains name of field of event relationship between anoter event 
+    * "freq_delay": (Interger / Second) time delay between first event and last event (if freq_count == 3 then first 1 and last 3)
+    * "freq_count": (Interger) count of event you must see for match
+    * "freq_resettime": (Interger / Second) time to wait for reseach new frequence when you already detected
+    * "correlate_change_fieldvalue": (Array) value is fields name, check field indicated and verify if value is different for each event matched
+  * Check differents methods
+    * "motif": (Array) value is all motifs to check in field selected.
+    * "false": (Hash empty) add key "false" with value hash empty for verify than field not exist
+    * "regexp": (Array) (ex: ["^\\d+$","..."]) value is contains regexp, each regexp must be match for valid check. 
+    * "notregexp": (Array) value is contains regex, no regexp musn't be match for valid check.
+    * "date": (Hash) (syntax: {'egal'|'inf'|'sup'|'diff': x in second}) value contains operator and time in second, check if date is (time.now)-value of time is validate by operator (<,>,!=,==) 
+    * "hour":  (Hash) (syntax: {'egal'|'inf'|'sup'|'diff': 0 to 23}) value contains operator and hour range, check if current hour is valid operator (<,>,!=,==) compared to hour indicated
+    * "day": (Hash) (syntax: {'egal'|'inf'|'sup'|'diff': 0 to 6}) value contains operator and day range, check if current day is day of value with operator (<,>,!=,==) compared to day indicated
+    * "ipaddr": (Hash) (syntax: {'egal'|'diff']: ipaddr or subnet}) value contains operator and ipaddr range, check if ipaddr in field event is valid operator (equalf or different) compared to ipaddr range indicated
+    * "sizeope" : (Hash) (syntax: {['egal'|'inf'|'sup'|'diff']: x}) value contains operator and length(x), check size of string contained in field selected, and compare according by operator selected with the value length.
+    * "numop" : (Hash) (syntax: {['egal'|'inf'|'sup'|'diff']: x}) value contains operator and integer value (x), check interger contained in field selected, and compare according by operator selected with the integer value.
+    * "compope": (Hash) (syntax: {"fieldz": {['egal'|'inf'|'sup'|'diff']: nil}}) value contains other name field compare, operator, compare field and fieldz and check operator if valid.
+
+```json
 {"rules":[
 	{"type":{"motif":["squid"],"type":1,"note":1,"name":"Field User-AGENT not present","id":1},"user_agent":{"false":{}}},
         {"new_value_dst_host":{"sizeope":{"sup":1},"type":1,"note":1,"name":"New value dst_host","id":2},"type":{"motif":["squid"]}},
@@ -283,34 +316,39 @@ Each rule is Hash composed of multi element optionnal and mandatory:
 	{"type":{"motif":["squid"],"type":2,"note":2,"name":"Referer FIELD not present","id":4},"uri_proto":{"notregexp":["tunnel"]},"referer_host":{"false":{}}}
 ]}
 ```
+
 ### REFERENCE (OLD ANOMALIE)
 #### conf_ref.json
-This file contains rules to check on event and also use for create databases reference (script).
-The file json contains a key named 'rules' and this value is Array which contains all rules.
-A rule is composed of multi elements:
-* Key "pivot_field" : use for filter event by rule (select rule), value is hash with key is event field name, and value is Array which contains value which must present in event field.
-* Key "list_sig" : value is Array contains name of field in event checked in reference databases. If field not present in some case, it's doesn't matter. 
-* Key "relation_min" : value is integer, used in relationship between field on field not unique. This relationship create simhash, the reference databases contains count of simhash value seem in all event type. Exemple if simhash "1111111" count 9 time in all event then if you set 10 this parameter, the plugins match rule because relationship not exist for him/it.
-* Key "simhash_size" : value is integer, use for create simhash size... If you use little value then you more chance you find value simhash with event near.
-* Key "simhash_use_size" (Not works, i will work on!)
-* Key "id" : use for identified rule matched and used in score/note function.
+The conf_ref.json file contains rules to compare event and reference database.
 
-** This file is a Json format **
-```
+The first key name is 'rules', the value is an array contains all rule.
+Run script for generate reference database before use this feature (**when you generate database reference use clean data or/and verify configuration generated!!**).
+A rule is composed of several pair of key/value:
+* Key "pivot_field" : filter for select event to check
+  * value is a hash with key as field name and value is an array contains value present in event field selected.
+* Key "list_sig" : value is an array contains all fields name selected for compare with reference database. If some fields not present in some case, it's doesn't matter. 
+* Key "relation_min" : value is integer, verify than relationship simhash exist and is supperior to "relation_min".
+* Key "simhash_size" : value is integer, make size of simhash... (change according by data size to simhash)
+* Key "simhash_use_size" (Not works, i will work on!)
+* Key "id" : valud is ID of rule
+
+```json
 {"rules":[ 
   {"pivot_field":{"tags":["squid"]}, "list_sig": ["src_host","src_ip","dst_host","dst_ip","uri_proto","uri_global"], "relation_min": 10, "simhash_size": 32, "simhash_use_size": 32, "id": 2001}
 ]}
 ```
+
 #### Create reference database (reference.json)
-For create databases (reference.json file) use script include in scripts folder.
+Generate database reference (reference.json file) with script include in scripts folder.
 Run script with syntaxe: ./create.rb conf_ref.json pattern.db  https://user:secret@localhost:9200
-For make good databases, use elasticsearch contains clean data log else you verify databases containt and change strange value.
+For make good databases, use elasticsearch contains clean data log and verify database for change strange value.
 
 ##### note_ref_defaut.json
-This file contains note/score by default for each check of reference verification matched.
-The 'NOTE_UNIQ_REDUC' used for reduce score of matched on field check. By example if match LEN problem then if uniq field value, score is not 0.25 but 0.25-0.1 => 0.15.
-** This file is a Json format **
-```
+This file contains score by default for each rule matched.
+The names keys contains suffix "NOTE" and name of verification method, the value fix note for method matched.
+Only a key is different, "NOTE_UNIQ_REDUC" can reduce score when event is "unique". By example if matched LEN method and if "uniq" matched then score value is not 0.25 but 0.25-0.1 => 0.15 (according by configuration below).
+
+```json
 {
 	'NOTE_UNIQ_REDUC': 0.1, 
 	'NOTE_DEFAULT': 2,
@@ -323,10 +361,12 @@ The 'NOTE_UNIQ_REDUC' used for reduce score of matched on field check. By exampl
 	'NOTE_REGEXP_MIN': 0.25
 	}
 ```
+
 ##### pattern.db  
-This file is used in check of regexp on field value.
-This file is ** not ** a Json format.
-```
+
+This file contains regexp for check format of field value.
+
+```json
 ALPHA_MAJU=>>[A-Z]
 ALPHA_MINU=>>[a-z]
 NUM_1to9=>>[1-9]
@@ -530,146 +570,75 @@ CHAR_ETEND_FF=>>\xFF
 ```
 
 ##### reference.json
-** TODO: describe file composition for change if you need/want **
+This file is generated by script on clean data Elasticsearch.
 
 ### NOTE
-This file (note.json) contains rules for correlation score, you can reduce or inscrease score when you matched multi rules (IOC/REF/SIG).
-The json file contains main key 'rules' in value is Array.
-Each element array is a Rule. A rule is composed of multi elements:
-* 'id' Key : value is a array contains all id which must present in event
-* 'optid' Key : value is a array contains all id which maybe present in event
-* 'opt_num' Key : value is a integer which indicate number of optionnal id must be present in event. In example below, at least one id between 3 and 4 must be present.
-* 'noid' Key : value is a array contains all id which must ** not ** present in event
-* 'overwrite' Key : value is boolean, indicate if overwrite score reduce even if actually event score is bigger
-** This file is a Json format **
-```
+#### note.json
+This file (note.json) contains rules for correlation score, you can reduce or inscrease score when you matched several features (IOC/REF/SIG).
+The json file contains main key 'rules' and value is an array contains each rule in hash format.
+key/value of hash Rule are:
+* 'id' Key : value is a array contains all "ID" matched in event
+* 'optid' Key : value is a array contains all "ID" maybe matched in event
+* 'opt_num' Key : value is a integer indicate count of 'optid' must be present in event. In example below, at least one ID, 3 or 4 must be present.
+* 'noid' Key : value is a array contains all ID musn't be present in event
+* 'overwrite' Key : value is boolean, indicate if you can overwrite score for reduce.
+
+```json
 {"rules":[
 	{"id":[2],"optid":[3,4],"opt_num":1,"noid":[],"note":3,"overwrite":true}
 	]
 }
 ```
+
 ### FINGERPRINT
-The file fingerprint_conf.json contains rules which create fingerprint on event and tag with first or complementary information.
-The key of Json is value must present in select_fp (main configuration). The value of key is Hash composed of multi key+value:
-* Key 'fields': value contains Array with name of field used for create simhash.
-* Key 'delay': use for restart with tag first after delay (utility for dhcp by example). The value is number in second.
-* Key 'hashbit': value is number, use for define size of simhash.
-** This file is a Json format **
-```
+#### fingerprint_conf.json
+The file fingerprint_conf.json contains rules for create fingerprint, and tag "first" or "complementary information" in event.
+The first key is value must be present in select_fp (main configuration). The value of key is Hash composed with key/value:
+* Key 'fields': value is array contains name of field used for create simhash.
+* Key 'delay': reset all fingerprint for "fields" after time exceeded (use for dhcp by example). The value is second number.
+* Key 'hashbit': value is number, define size of simhash.
+
+```json
 {
 "squid":{"fields":["src_ip","dst_host","dst_ip","uri_proto","sig_detected_name","ioc_detected","tags"],"delay":36000, "hashbit": 32}
 }
 ```
+
 #### drop-fp.json
-Use this file for drop event for false positive by example. The key of json is simhash and value is reason of drop.
-** This file is a Json format **
-```
+Drop false positive event. The key of json is simhash and value is reason of drop.
+
+```json
 {"821861840": "false positive: update of software XXX"}
 ```
+
 ### FREQUENCE
-THe file conf_freq.json contains rules for create interne db frequence (restart from zero if you restart logstash).
-The first key is rules and value is array which contains rules.
-A rule is hash composed of multi element:
-* Key 'select_field': value is hash with key field name and value array contais value must present. THis parameter is filter.
-* Key 'note': use parameter for set score if rule matched
-* Key 'refresh_time': use parameter for give delay between each verify if event increase 
-* Key 'reset_time': use paramter for give delai for reset database value (for only this rule)
+#### conf_freq.json
+The file conf_freq.json contains rules for create interne db frequence (reset if you restart logstash).
+The first key is rules and value is array which contains each rule in hash format.
+A rule is hash composed of key/value:
+* Key 'select_field': value is hash, key is field in event and value is an array contains value must be present in event field. This parameter is filter for selected event to check.
+* Key 'note': score of rule
+* Key 'refresh_time': parameter give delay check (event increase?)
+* Key 'reset_time': paramter give delay for reset database value (for only this rule)
 * Key 'wait_after_reset': time to wait after reset database or first start
-* Key 'id': value is number. Use parameter to fix id of rule.
-** This file is a Json format **
-```
+* Key 'id': value is number. ID of rule
+
+```json
 {"rules":[ 
   {"select_field": {"tags":["squid"],"return_code":["404"]}, "note": 2, "refresh_time": 60, "reset_time": 86400, "wait_after_reset": 10, "id": 3001}
 ]}
 ```      
 
-## Documentation
-
-Logstash provides infrastructure to automatically generate documentation for this plugin. We use the asciidoc format to write documentation so any comments in the source code will be first converted into asciidoc and then into html. All plugin documentation are placed under one [central location](http://www.elastic.co/guide/en/logstash/current/).
-
-- For formatting code or config example, you can use the asciidoc `[source,ruby]` directive
-- For more asciidoc formatting tips, see the excellent reference here https://github.com/elastic/docs#asciidoc-guide
-
-## Need Help?
-
-Need help? Try #logstash on freenode IRC or the https://discuss.elastic.co/c/logstash discussion forum.
-
-## Developing
-
-### 1. Plugin Developement and Testing
-
-#### Code
-- To get started, you'll need JRuby with the Bundler gem installed.
-
-- Create a new plugin or clone and existing from the GitHub [logstash-plugins](https://github.com/logstash-plugins) organization. We also provide [example plugins](https://github.com/logstash-plugins?query=example).
-
-- Install dependencies
-```sh
-bundle install
-```
-
-#### Test
-
-- Update your dependencies
-
-```sh
-bundle install
-```
-
-- Run tests
-
-```sh
-bundle exec rspec
-```
-
-### 2. Running your unpublished Plugin in Logstash
-
-#### 2.1 Run in a local Logstash clone
-
-- Edit Logstash `Gemfile` and add the local plugin path, for example:
-```ruby
-gem "logstash-filter-awesome", :path => "/your/local/logstash-filter-awesome"
-```
-- Install plugin
-```sh
-# Logstash 2.3 and higher
-bin/logstash-plugin install --no-verify
-
-# Prior to Logstash 2.3
-bin/plugin install --no-verify
-
-```
-- Run Logstash with your plugin
-```sh
-bin/logstash -e 'filter {awesome {}}'
-```
-At this point any modifications to the plugin code will be applied to this local Logstash setup. After modifying the plugin, simply rerun Logstash.
-
-#### 2.2 Run in an installed Logstash
-
-You can use the same **2.1** method to run your plugin in an installed Logstash by editing its `Gemfile` and pointing the `:path` to your local plugin development directory or you can build the gem and install it using:
-
-- Build your plugin gem
-```sh
-gem build logstash-filter-awesome.gemspec
-```
-- Install the plugin from the Logstash home
-```sh
-# Logstash 2.3 and higher
-bin/logstash-plugin install --no-verify
-
-# Prior to Logstash 2.3
-bin/plugin install --no-verify
-
-```
-- Start Logstash and proceed to test the plugin
-
 ## Contributing
 
-All contributions are welcome: ideas, patches, documentation, bug reports, complaints, and even something you drew up on a napkin.
 
-Programming is not a required skill. Whatever you've seen about open source and maintainers or community members  saying "send patches or die" - you will not see that here.
+** You welcome to contribute (report bug, new functionality, ...)! **
 
-It is more important to the community that you are able to contribute.
+** Possibility you meet bug, I recently ported on logstash 5.x !! ** 
 
-For more information about contributing, see the [CONTRIBUTING](https://github.com/elastic/logstash/blob/master/CONTRIBUTING.md) file.
+This is a plugin for [Logstash](https://github.com/elastic/logstash).
+
+It is fully free and fully open source. The license is Apache 2.0, meaning you are pretty much free to use it however you want in whatever way.
+
+## Contact
+Lionel PRAT lionel.prat9 (at) gmail.com or cronos56 (at) yahoo.com
