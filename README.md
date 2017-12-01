@@ -48,6 +48,15 @@
 * Fingerprint event according by rule for identify unique event & Drop fingerprint (false positive usage)
 * Check frequence on specifique event by filters. Alert not created on a specifique event, but it create new event.
 
+### Install with Docker
+
+*DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
+
+Enter in directory "docker" and edit file "docker-compose.yml" :
+* volumes: change volume source (on host) with your logstash path configuration
+
+Before run docker composer, verify configuration logstash is valid. Verify configuration plugin logstash is valid too (use sample configuration in plugins directory for help you).
+
 ## logstash-filter-ensig
 
 *Logstash plugin Filter "EnrSig" can help you to enrich event with different sources informations (database, system command, external request, ...).*
@@ -60,6 +69,15 @@ Normaly, enrsig is called by plugin "sig" (in begin check) according by the rule
     * Check if result exist already for value then pass to other ask, or if the end then send result
       * If data not exist then execute commande syntaxe with value(s) and parse result according by template, and pass to next ask or send result
 
+### Install with Docker
+
+*DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
+
+Enter in directory "docker" and edit file "docker-compose.yml" :
+* volumes: change volume source (on host) with your logstash path configuration
+
+Before run docker composer, verify configuration logstash is valid. Verify configuration plugin logstash is valid too (use sample configuration in plugins directory for help you).
+
 ## logstash-output-fir
 
 *Logstash plugin Output for send alert (created by filter sig) in FIR (Cert SG - https://github.com/certsocietegenerale/FIR)*
@@ -69,6 +87,16 @@ Normaly, enrsig is called by plugin "sig" (in begin check) according by the rule
  * Create rule for send alert to FIR
  * Create or use default template to custom sent alert to FIR.
  * use fingerprint(sig plugin) for create one thread by IP SRC/MAC ADR in FIR for all alert
+
+### Install with Docker
+
+*DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
+
+Enter in directory "docker" and edit file "docker-compose.yml" :
+* volumes: change volume source (on host) with your logstash path configuration
+
+Before run docker composer, verify configuration logstash is valid. Verify configuration plugin logstash is valid too (use sample configuration in plugins directory for help you).
+
 
 ## Architecture sample (FR version)
 ![alt text](https://github.com/lprat/logstash-plugins/raw/master/sample-architecture/Architecture-sample.png "Architecture sample")
