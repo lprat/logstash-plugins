@@ -48,8 +48,9 @@
 * Fingerprint event according by rule for identify unique event & Drop fingerprint (false positive usage)
 * Check frequence on specifique event by filters. Alert not created on a specifique event, but it create new event.
 
-### Install with Docker
+### Install by Docker
 
+* You can use docker cloud: docker pull lprat/logstash-plugins:latest
 *DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
 
 Enter in directory "docker" and edit file "docker-compose.yml" :
@@ -69,7 +70,7 @@ Normaly, enrsig is called by plugin "sig" (in begin check) according by the rule
     * Check if result exist already for value then pass to other ask, or if the end then send result
       * If data not exist then execute commande syntaxe with value(s) and parse result according by template, and pass to next ask or send result
 
-### Install with Docker
+### Install by Docker
 
 *DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
 
@@ -88,7 +89,7 @@ Before run docker composer, verify configuration logstash is valid. Verify confi
  * Create or use default template to custom sent alert to FIR.
  * use fingerprint(sig plugin) for create one thread by IP SRC/MAC ADR in FIR for all alert
 
-### Install with Docker
+### Install by Docker
 
 *DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
 

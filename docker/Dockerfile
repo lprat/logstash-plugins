@@ -1,6 +1,6 @@
 #Docker logstash with plugin output FIR && filter sig + enrsig
 # Pull base image.
-FROM docker.elastic.co/logstash/logstash:6.6.2
+FROM docker.elastic.co/logstash/logstash-oss:6.6.2
 MAINTAINER Lionel PRAT <lionel.prat9@gmail.com>
 
 #install simhash
@@ -17,6 +17,7 @@ RUN logstash-plugin install logstash-filter-enrsig
 
 #install others plugins
 RUN logstash-plugin install logstash-output-lumberjack
+RUN logstash-plugin install logstash-input-lumberjack
 
 #install extra for enrsig by example
 #RUN apt-get update && apt-get install -y --no-install-recommends nbtscan python-whois && rm -rf /var/lib/apt/lists/*
