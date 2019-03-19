@@ -21,5 +21,5 @@ RUN logstash-plugin install logstash-output-lumberjack
 #install extra for enrsig by example
 #RUN apt-get update && apt-get install -y --no-install-recommends nbtscan python-whois && rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
 CMD ["-e", ""]
