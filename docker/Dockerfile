@@ -1,15 +1,14 @@
 #Docker logstash with plugin output FIR && filter sig + enrsig
 # Pull base image.
-FROM logstash
+FROM docker.elastic.co/logstash/logstash:6.6.2
 MAINTAINER Lionel PRAT <lionel.prat9@gmail.com>
 
 #install simhash
-RUN curl -sSL https://get.rvm.io | bash && /usr/local/rvm/bin/rvm install 1.9.3-dev
-ADD mkmf.rb.patch /tmp/mkmf.rb.patch
-RUN cd / && patch -Np1 /usr/share/logstash/vendor/jruby/lib/ruby/shared/mkmf.rb < /tmp/mkmf.rb.patch && rm /tmp/mkmf.rb.patch
-#bug with install simhash direct, try to install activesupport version 5.x which require ruby 2.x
-RUN env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/1.9 JRUBY_OPTS='-Xcext.enabled=true' /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/jruby/bin/gem install activesupport -v '4.1.16'
-RUN env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/1.9 JRUBY_OPTS='-Xcext.enabled=true' /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/jruby/bin/gem install simhash -v '0.2.5'
+USER root
+RUN yum update -y && yum groupinstall -y 'Development Tools'
+USER logstash
+RUN env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/2.3.0 /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/jruby/bin/gem install activesupport -v '4.1.16'
+RUN env GEM_HOME=/usr/share/logstash/vendor/bundle/jruby/2.3.0 /usr/share/logstash/vendor/jruby/bin/jruby /usr/share/logstash/vendor/jruby/bin/gem install simhash -v '0.2.5'
 
 #install plugins
 RUN logstash-plugin install logstash-output-fir
