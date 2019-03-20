@@ -1,7 +1,8 @@
 version: '2'
 
 services:
-    lprat/logstash-plugins:latest:
+    logstash-instancex:
+        image: lprat/logstash-plugins:latest
         build:
             context: .
             args:
