@@ -91,6 +91,7 @@ Before run docker composer, verify configuration logstash is valid. Verify confi
 
 ### Install by Docker
 
+*Docker in cloud: lprat/logstash-plugins:latest
 *DockerFile create contener with last logstash and install plugin: sig, enrsig and fir. If you add others plugins, please edit Dockerfile before run docker composer*
 
 Enter in directory "docker" and edit file "docker-compose.yml" :
@@ -99,7 +100,7 @@ Enter in directory "docker" and edit file "docker-compose.yml" :
 Before run docker composer, verify configuration logstash is valid. Verify configuration plugin logstash is valid too (use sample configuration in plugins directory for help you).
 
 * Lumberjack certificat
-<code>
+~~~
 reference: https://github.com/logstash-plugins/logstash-output-lumberjack/issues/11
 #Generate a CA, Key + Signed Cert
 /opt/elasticsearch-6.4.2/bin/elasticsearch-certutil cert --pem
@@ -148,7 +149,7 @@ input {
 output {
    stdout { codec => rubydebug }
 }
-</code>
+~~~
 
 ## Architecture sample (FR version)
 ![alt text](https://github.com/lprat/logstash-plugins/raw/master/sample-architecture/Architecture-sample.png "Architecture sample")
