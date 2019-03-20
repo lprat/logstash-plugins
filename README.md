@@ -98,6 +98,57 @@ Enter in directory "docker" and edit file "docker-compose.yml" :
 
 Before run docker composer, verify configuration logstash is valid. Verify configuration plugin logstash is valid too (use sample configuration in plugins directory for help you).
 
+* Lumberjack certificat
+<code>
+reference: https://github.com/logstash-plugins/logstash-output-lumberjack/issues/11
+#Generate a CA, Key + Signed Cert
+/opt/elasticsearch-6.4.2/bin/elasticsearch-certutil cert --pem
+unzip certificate-bundle.zip
+
+# Convert the key to PKCS8
+openSSL pkcs8 -in ./instance/instance.key -topk8 -nocrypt -out ./instance/instance.pk8
+
+###################################################################
+#Upstream Logstash Server
+
+# This input could be anything...
+input {
+  stdin {}
+  }
+}
+
+# Send the output to a downstream server
+output {
+   lumberjack {
+      codec => json
+      hosts => [ "127.0.0.1" ]
+      port => 5044
+      ssl_certificate => "/Users/Downloads/lumberjack/certs/ca.crt"
+   }
+}
+
+###################################################################
+#Downstream Logstash Server
+#
+#  Using the BEATS input to receive data from the upsteam Logstash server
+#  which is using the lumberjack output.
+#
+input {
+  beats {
+    id => "mylumberjack"
+    codec => json
+    port => 5044
+    ssl_certificate => "/Users/Downloads/lumberjack/certs/instance.crt"
+    ssl_key => "/Users/Downloads/lumberjack/certs/instance.pk8"
+    ssl => true
+  }
+
+}
+
+output {
+   stdout { codec => rubydebug }
+}
+</code>
 
 ## Architecture sample (FR version)
 ![alt text](https://github.com/lprat/logstash-plugins/raw/master/sample-architecture/Architecture-sample.png "Architecture sample")
