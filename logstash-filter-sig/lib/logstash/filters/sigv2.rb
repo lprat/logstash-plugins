@@ -1,0 +1,2588 @@
+# encoding: utf-8
+# Filter "SIG" analyze signature regexp with condition
+# POC on event normalized -- experimental version
+# Contact: Lionel PRAT (lionel.prat9@gmail.com)
+
+require "logstash/filters/base"
+require "logstash/namespace"
+require "json"
+require "simhash"
+require 'digest'
+require "openssl"
+require 'ipaddr'
+require 'time'
+
+#TODO fix fingerprint must be used when SIG/REF/IOC detected
+#plugin multi function:
+# - signature 
+# - IOC
+# - ANOMALIE
+# - new value in time or no time
+# - fingerprint simhash
+# - filter false positive
+# - first drop list on fingerprint or field -> regexp (ex: host & domain)
+# Optimiz
+
+#TODO: SIG add tag on sig for FIR
+class ::Hash
+    def deep_merge(second)
+        merger = proc { |key, v1, v2| Hash === v1 && Hash === v2 ? v1.merge(v2, &merger) : v2 }
+        self.merge(second, &merger)
+    end
+end
+
+class LogStash::Filters::Sig < LogStash::Filters::Base
+  config_name "sig"
+  milestone 1
+  ############PLUGIN LOGSTASH SIG -- lionel.prat9@gmail.com #############
+  ############MULTI FUNCTIONNALITY IN ORDER CALL########################
+  ###### DROP_FIRST[FIELD(regexp_list)]->NEW_VALUE[time/notime]->BL->SIG[FIELD_IOC(misp_extract),RULES(list),FALSE_POSITIVE(drop),ANOMALIE(db_reference),DROP_END[SIMHASH(match_list)],FREQ(db_frequence -> create new event if alert) ########
+  ###### SIG add special_tag if match #######
+  ############### CONFIG DROP SIMPLE FIRST & FINGERPRINT SIMHASH ###################
+  ## DESCRIPTION: use for drop noise without risk with very simple rule, if nothing detected then create fingerprint simhash, thus check if fingerprint content in db fingerprint false positive to drop.
+  ##              Fingerprint hash can use by active add information (scan active, whois, ssl check, ...) for avoid to verify multi time for same alert.
+  ## EXAMPLE: { "domain" : "^google.(com|fr)$"}
+  #disable by field in event
+  config :no_check, :validate => :string, :default => "sig_no_apply_all"
+  #disable functions
+  config :disable_drop, :validate => :boolean, :default => false
+  config :disable_enr, :validate => :boolean, :default => false
+  config :disable_fp, :validate => :boolean, :default => false
+  config :disable_nv, :validate => :boolean, :default => false
+  config :disable_bl, :validate => :boolean, :default => false
+  config :disable_ioc, :validate => :boolean, :default => false
+  config :disable_sig, :validate => :boolean, :default => false
+  config :disable_ref, :validate => :boolean, :default => false
+  config :disable_freq, :validate => :boolean, :default => false
+  config :disable_note, :validate => :boolean, :default => false
+  
+  #if field exist in event then no apply drop & fingerprint
+  config :noapply_sig_dropfp, :validate => :string, :default => "sig_no_apply_dropfp"
+  config :noapply_sig_dropdb, :validate => :string, :default => "sig_no_apply_dropdb"
+  
+  
+  #CONF FINGERPRINT - format: json {"type": {fields: [a,b,c], delay: 3600, hashbit: 16},}
+  # create simhash (on hashbit) with fields [a,b,c] for delay 3600 . The delay is used for tag first alert or complementary information. Use delay by exemple if you use dhcp and ip in fingerprint...
+  config :conf_fp, :validate => :path, :default => "/etc/logstash/db/fingerprint_conf.json"
+  
+  #DROP RULES DB - format: json {"field": "regexp"} - don't use same field name more time
+  config :db_drop, :validate => :path, :default => "/etc/logstash/db/drop-db.json"
+  #DROP FINGERPRINT DB - format: json {"fingerprint": "raison of fp"}
+  config :db_dropfp, :validate => :path, :default => "/etc/logstash/db/drop-fp.json"
+  
+  #Name of field for select rules fp - exemple event['type']="squid" -- in fp_conf.sig: #{"squid":{"fields":["src_ip","dst_host","dst_ip","uri_proto","sig_detected_name","ioc_detected","tags"],"hashbit":8,"delay":3600}}
+  #                                                    |-->   ^^^^^                        ^^^^^  
+  config :select_fp, :validate => :string, :default => "type"
+  #Name of field to save fingerprint
+  config :target_fp, :validate => :string, :default => "fingerprint"
+  
+  # add tage name if not match
+  # tag mark for difference first fingerprint see, another fingerprint identical is tagger with tag_name_after (complementary information)
+  config :tag_name_first, :validate => :string, :default => "first_alert"
+  config :tag_name_after, :validate => :string, :default => "info_comp"
+  #Select field for write tag information fp: first or complementary
+  config :target_tag_fp, :validate => :string, :default => "tags"
+  
+  #interval to refresh conf fingerprint & db
+  config :refresh_interval_conffp, :validate => :number, :default => 3600
+  #interval to refresh database rules & fingerprint
+  config :refresh_interval_dropdb, :validate => :number, :default => 3600
+
+  ############### CONFIG ENRICHMENT ###################
+  #Description: add info in event by enrichment active or passive
+  
+  #File config - format: json 
+  config :conf_enr, :validate => :path, :default => "/etc/logstash/db/enr.json"
+
+  #if field exist in event then no apply new value tag
+  config :noapply_sig_enr, :validate => :string, :default => "sig_no_apply_enr"
+  
+  #interval to refresh conf new_value
+  config :refresh_interval_enr, :validate => :number, :default => 3600
+
+  #field name where you add request for server add information active
+  config :field_enr, :validate => :string, :default => "request_enrichiment"
+  
+  #enr_tag_response used for identify who is origin of resquest, and send response to good server
+  config :enr_tag_response, :validate => :string, :required => :true, :default => "ENR_RETURN_TO_JOHN"
+  
+  #When information not in db and you must to have, send event to another server (contacted by lumberjack) who ask info and add in @field_enr
+  # after add info in field, resend to server origin by lumberjack
+  
+  ############### CONFIG NEW VALUE ###################
+  #Description: check by rule if event is new and tag event
+  #Exemple: verify on field domain new value, if field domain in event content new value then add in db and tag event
+  
+  #File config - format: json {"rules": ["fieldy","fieldx"]}
+  config :conf_nv, :validate => :path, :default => "/etc/logstash/db/new.json"
+
+  #File save db - format: json
+  config :db_nv, :validate => :path, :default => "/etc/logstash/db/new-save.json"
+
+  #if field exist in event then no apply new value tag
+  config :noapply_sig_nv, :validate => :string, :default => "sig_no_apply_nv"
+  
+  #interval to refresh conf new_value
+  config :refresh_interval_confnv, :validate => :number, :default => 3600
+  
+  #interval to save file db new value
+  config :save_interval_dbnv, :validate => :number, :default => 3600
+  
+  #Name of prefix field to save new_value tag (prefix+field_name)
+  config :target_nv, :validate => :string, :default => "new_value_"
+  
+  ############### CONFIG BL REPUTATION ###################
+  #Description: check if field value is present in DB REPUTATION
+  #JUST IP for first time
+  
+  #BL REPUT config - format: json {fieldx: {dbs: [file_name,...], note: X, id: X, category: "malware"}}
+  config :conf_bl, :validate => :path, :default => "/etc/logstash/db/conf_bl.json"
+  
+  #File contains BL REPUTATION
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webserver.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_webclient.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_abusers_30d.netset 
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_anonymous.netset
+  #https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_proxies.netset
+  config :file_bl, :validate => :array, :default => ["/etc/logstash/db/firehol_level1.netset","/etc/logstash/db/firehol_level2.netset","/etc/logstash/db/firehol_level3.netset","/etc/logstash/db/firehol_level4.netset","/etc/logstash/db/firehol_webserver.netset","/etc/logstash/db/firehol_webclient.netset","/etc/logstash/db/firehol_abusers_30d.netset","/etc/logstash/db/firehol_anonymous.netset","/etc/logstash/db/firehol_proxies.netset"]
+
+  #if field exist in event then no apply new value tag
+  config :noapply_sig_bl, :validate => :string, :default => "sig_no_apply_bl"
+  
+  #interval to refresh conf new_value
+  config :refresh_interval_confbl, :validate => :number, :default => 3600
+  
+  #field where add information on category detected
+  config :targetname_bl, :validate => :string, :default => "bl_detected_category"
+  
+  ############### CONFIG SIG BASE ###################
+  #numeric test: R[1]['champs0']['numope']['egal'|'inf'|'sup'|'diff']=numeric_value
+  #format file SIG JSON example: {"rules":[{"field2":{"motif":["mot1","mot2"],"note":5, "name":"test", "type":1, "id": 1, "extract": {'field': 'ioc_field'}},"field3":{"false":{}},"field1":{"regexp":["/update\\\?id\=[-0-9A-Fa-f]{8}","/[0-9A-F]{8}/[0-9A-F]{8}/[0-9A-F]{8}"]}},{"fieldx6":{},"fieldx5":{},"fieldx4":{}}]}
+  #R[1]['champs0']['regexp']=[]
+  #R[1]['champs1']['notregexp']=[]
+  #R[1]['champs2']['motif']=[]
+  #R[1]['champs0']['date']['egal'|'inf'|'sup'|'diff']=x  -> (time.now)-x ope value field
+  #R[1]['champs0']['hour']['egal'|'inf'|'sup'|'diff']=19 [interger]
+  #R[1]['champs0']['day']['egal'|'inf'|'sup'|'diff']=0 (0==sunday,1==monday,...) [Interger]
+  #R[1]['champs0']['ipaddr']['egal'|'diff']="192.168.0.0/24"
+  #R[1]['champs0']['sizeope']['egal'|'inf'|'sup'|'diff']=0
+  #R[1]['champs0']['numope']['egal'|'inf'|'sup'|'diff']=0
+  #R[1]['champs0']['compope']['champsX']['egal'|'inf'|'sup'|'diff'] => string(not sup & info for string)
+  #R[1]['champs3']['false']
+  #R[1]['champs3']['note'] = numeric, add one by rule/sig /* not importance for field use for note, juste one time */
+  #R[1]['champs3']['name'] = "SIG_DETECTED_TEST_01" /* not importance for field use for name, juste one time */
+  #R[1]['champs3']['type'] = 1 (primary sig -- defaut value) -- 2 (secondary sig -> add if only detect primary sig before)
+  #R[1]['champs3']['modeFP'] = true or false (true == delete & false or not present ==  detect)
+  #R[1]['champs3']['modeFP'] = true or false (true == delete & false or not present ==  detect)
+  # brute force & correlation sig add: "freq_field:" [field,field,field,field],"freq_delay":60s,freq_count: 3, freq_resettime: 3600s, correlate_change_fieldvalue: []
+  # use extract on sure alerte without false postive to add IOC in IOC check list in real time
+  # extract field value to insert in ioc_field; ex: extract: {'src_ip': 'ioc_ip', 'user_agent': 'ioc_user-agent'}
+  #order verify: FIELD, MOTIF, REGEXP
+  #At first detected sig, then stop search another sig!!!!
+  #File content rules signatures expression in json
+  config :conf_rules_sig, :validate => :path, :default => "/etc/logstash/db/sig.json"
+  config :file_save_localioc, :validate => :path, :default => "/etc/logstash/db/ioc_local.json"
+  #format json -- example:
+  #{"rules":[
+  #      {"id":[22],"optid":[16,38],"opt_num":1,"noid":[],"note":3,"overwrite":true}
+  #]}
+  # id: list contains id of rules must present
+  # optid & opt_num: list contains if of rules can present with minimum of "opt_num" id present
+  #         			exemple: [16,38] with opt_num =1 then if 16 or 38 or (16 and 38) present is match
+  # noid: list id of rules must absent
+  # overwrite: if overwrite is true, it's significate than if note is more less then defined before, the value is overwrite and note is more less.
+  # note: it's value of new note for event match.
+  config :conf_rules_note, :validate => :path, :default => "/etc/logstash/db/note.json"
+  
+  #Name of fields to save value if sig match: name sig, count
+  config :target_sig, :validate => :string, :default => "sig_detected"
+  config :targetnum_sig, :validate => :string, :default => "sig_detected_count"
+  config :targetname_sig, :validate => :string, :default => "sig_detected_name"
+  #Interval to refresh conf rules sig
+  config :refresh_interval_confrules, :validate => :number, :default => 3600
+  
+  #if field exist in event then no apply rules check
+  config :noapply_sig_rules, :validate => :string, :default => "sig_no_apply_rules"
+  
+  #stop check at one time find sig
+  config :check_stop, :validate => :boolean,  :default => false
+  
+  #LIST File content IOC - format json - exemple: {"ioc_as":["44050","55960","24961","203973"]}
+  config :db_ioc, :validate => :array, :default => ["/etc/logstash/db/ioc.json", "/etc/logstash/db/ioc_local.json"]
+  #Rules IOC Conf- format json - exemple get rules from list_field_ioc file: {"ioc_hostname":["_host"], "ioc_hostname_downcase":true, "ioc_hostname_iocnote":1, "ioc_hostname_iocid":1001}
+  # conf file significate for ioc_hostname search in value of field name containt string '_host'
+  # If ioc_hostname_downcase is true then force downcase value in field
+  # ioc_hostname_note give note to event if ioc match
+  # ioc_hostname_iocid: give id number to ioc, used in note_sig for change note by relation with another match (sig...). 
+  # Ioc ID must be more than 1000 -> 1001..1999
+  config :conf_ioc, :validate => :path, :default => "/etc/logstash/db/ioc_conf.json"
+  
+  #Name of fields to save value if ioc match: name ioc, count
+  config :target_ioc, :validate => :string, :default => "ioc_detected"
+  config :targetnum_ioc, :validate => :string, :default => "ioc_detected_count"
+  config :targetname_ioc, :validate => :string, :default => "ioc_detected_name"
+  
+  #Name of field where save note of sig & ioc ...
+  config :targetnote, :validate => :string, :default => "sig_detected_note"
+  config :targetid, :validate => :string, :default => "sig_detected_id"
+  
+  #Interval to refresh db ioc
+  config :refresh_interval_dbioc, :validate => :number, :default => 3600
+
+  #if field exist in event then no apply check ioc
+  config :noapply_ioc, :validate => :string, :default => "sig_no_apply_ioc"
+  
+  ##ANOMALIE
+  #Conf ref -- format json -- PIVOT -> SIG -> REF
+  # rules[ {"pivot_field":[field1,field2], "list_sig": [fieldx,fieldy,...]} ]
+  #list_sig: all field used for sig, if all field not present, it doesn't matter, use field present in event and list_sig
+  config :conf_ref, :validate => :path, :default => "/etc/logstash/db/conf_ref.json"
+  #DB reference extract of ES by script
+  config :db_ref, :validate => :path, :default => "/etc/logstash/db/reference.json"
+  #RegExp DB FILE
+  config :db_pattern, :validate => :path, :default => "/etc/logstash/db/pattern.db"
+  #Interval to refresh db reference
+  config :refresh_interval_dbref, :validate => :number, :default => 3600
+  #if field exist in event then no apply check ref
+  config :noapply_ref, :validate => :string, :default => "sig_no_apply_ref"
+  #Name of fields to save value if ref match: name ioc, count
+  config :target_ref, :validate => :string, :default => "ref_detected"
+  config :targetnum_ref, :validate => :string, :default => "ref_detected_count"
+  config :targetname_ref, :validate => :string, :default => "ref_detected_name"
+  config :ref_aroundfloat, :default => 0.5 # TODO :validate => :float
+  config :ref_stop_after_firstffind, :validate => :boolean, :default => true
+  #pivot 1 syslog_programm -> add in ref.json for add multi profil
+  #config :sg_extract, :validate => :string, :default => "syslog_program"
+  #pivot 2 syslog_pri -> add in ref.json for add multi profil
+  #config :spri_extract, :validate => :string, :default => "syslog_pri"
+  #exclude field for create sig -> add field list for create sig and add in ref.json
+  #config :exclude_create_sig, :validate => :array, :default => ["tags","@source_host","_type","type","@timestamp","@message","@version","_id","_index","_type","host","message","received_at","received_from","syslog_facility","syslog_facility_code","syslog_pri","syslog_pid","syslog_program","syslog_severity_code","syslog_severity"]
+  
+  ##FREQUENCE
+  #rules_freq = [ {'select_field': {'fieldx':[value_list],'fieldy':[value_list]}, 'note': X, 'refresh_time': Xseconds,'reset_time': Xseconds[1j], 'reset_hour': '00:00:00', 'wait_after_reset': 10, 'id': 30XXX},...]
+  config :conf_freq, :validate => :path, :default => "/etc/logstash/db/conf_freq.json"
+  #Interval to refresh rules frequence
+  config :refresh_interval_freqrules, :validate => :number, :default => 3600
+  #if field exist in event then no apply check freq
+  config :noapply_freq, :validate => :string, :default => "sig_no_apply_freq"  
+  #rules_freq = [ {'select_field': {'fieldx':[value_list],'fieldy':[value_list]}, 'note': X, 'refresh_time': Xseconds,'reset_time': Xseconds[1j], 'reset_hour': '00:00:00', 'wait_after_reset': 10, 'id': 30XXX},...]
+  #select field for select => first filter
+  #select field value => second filter
+  #refresh_time for check and calculate all time result: max & variation
+  # note if match
+  # reset time in second for reset all counter value
+  # reset hour for begin reset with hour => use for 24h reset begin at 00:00
+  # wait_after_reset: dont't check before 10 times values
+  #db_freq = { '30XXX': {'refresh_date': date, 'old_date': date,'num_time': Xtimes, 'V_prev': x/m, 'Varia_avg': z/m, 'count_prev': Xtimes, 'count_cour': Xtimes, 'V_max': x/m, 'Varia_max': x/m, 'Varia_min': +/- x/m, 'Varia_glob': x/m}}
+  #check refresh db ref
+  public
+  def register
+    @logger.info("Plugin SIG. Loading conf...")
+    #create var extract file db & conf
+    @ioc_db = {}
+    @ioc_db_local = JSON.parse( IO.read(@file_save_localioc, encoding:'utf-8') ) unless @disable_sig and @disable_ioc #use on sig extract
+    @ioc_rules = {}
+    @note_db = []
+    @sig_db = {}
+    @sig_db_array = []
+    @sig_db_array_false = []
+    @sig_db_array_len = 0
+    @nv_db = JSON.parse( IO.read(@db_nv, encoding:'utf-8') ) unless @disable_nv
+    @nv_rules = {}
+    @fp_rules = {}
+    @fp_db = {}
+    @drop_db = {}
+    @fingerprint_db = {} #temporary db
+    @ref_db = {}
+    @pattern_db = {}
+    @ref_rules = {}
+    @freq_rules = {}
+    @db_freq = {}
+    @bl_db = {} # {file_name:[IP]}
+    @bl_rules = {}
+    @db_enr = {}
+    ###
+    ###special DB
+    @sig_db_freq = {}
+    ###
+    #hash file
+    @hash_conf_rules_sig = ""
+    @hash_conf_rules_note = ""
+    @hash_conf_freq = ""
+    @hash_conf_fp = ""
+    @hash_conf_nv = ""
+    @hash_conf_bl = ""
+    @hash_dbbl = {}
+    @hash_dbioc = {}
+    @hash_conf_ioc = ""
+    @hash_dbref = ""
+    @hash_dbpattern = ""
+    @hash_conf_ref = ""
+    @hash_dropdb = ""
+    @hash_dropfp = ""
+    @hash_conf_enr = ""
+    @hash_dbfile_enr = {}
+    @hash_db_enr = {}
+    ###
+    #load conf & db
+    @load_statut = false
+    load_conf_rules_sig unless @disable_sig
+    load_conf_rules_note unless @disable_sig and @disable_ioc and @disable_ref
+    load_conf_fp unless @disable_fp
+    load_conf_nv unless @disable_nv
+    load_conf_ioc unless @disable_ioc
+    load_conf_bl unless @disable_bl
+    load_db_ioc unless @disable_ioc
+    load_db_drop unless @disable_drop
+    load_db_dropfp unless @disable_fp
+    load_db_pattern unless @disable_ref
+    load_db_ref unless @disable_ref
+    load_rules_freq unless @disable_freq
+    load_db_enr unless @disable_enr
+    @load_statut = true
+    @load_statut_rules = true
+    @load_statut_fp = true
+    @load_statut_nv = true
+    @load_statut_bl = true
+    @save_statut_nv = true
+    @load_statut_ioc = true
+    @load_statut_ref = true
+    @load_statut_drop = true
+    @load_statut_freqrules = true
+    @load_statut_note = true
+    @load_statut_enr = true
+    ###
+    @logger.info("finish")
+    #next refresh file
+    tnow = Time.now
+    @next_refresh_dbref = tnow + @refresh_interval_dbref
+    @next_refresh_dbioc = tnow + @refresh_interval_dbioc
+    @next_refresh_confrules = tnow + @refresh_interval_confrules
+    @next_refresh_confnv = tnow + @refresh_interval_confnv
+    @next_refresh_confbl = tnow + @refresh_interval_confbl
+    @next_refresh_dbnv = tnow + @save_interval_dbnv
+    @next_refresh_dropdb = tnow + @refresh_interval_dropdb
+    @next_refresh_conffp = tnow + @refresh_interval_conffp
+    @next_refresh_note = tnow + @refresh_interval_confrules
+    @next_refresh_freqrules = tnow + @refresh_interval_freqrules
+    @next_refresh_enr = tnow + @refresh_interval_enr
+    ###
+  end # def register
+
+  public
+  def filter(event)
+    return unless filter?(event)
+    #check field no_check if present stop search
+    return unless event.get(@no_check).nil?
+    #get time for refresh
+    tnow = Time.now
+    
+    ######DROP FIRST DB USE######
+    #refresh db
+    unless @disable_drop
+      if @next_refresh_dropdb < tnow
+        if @load_statut_drop == true
+          @load_statut_drop = false
+          load_db_drop
+          @next_refresh_dropdb = tnow + @refresh_interval_dropdb
+          @load_statut_drop = true
+        end
+      end
+      sleep(1) until @load_statut_drop
+    end
+    #check if db not empty 
+    if not @drop_db.empty? and event.get(@noapply_sig_dropdb).nil? and not @disable_drop
+      @drop_db.each do |dkey,dval|
+        #search field with name of dkey
+        if not event.get(dkey).nil? and event.get(dkey).is_a?(String) and not dval.empty? and event.get(dkey) =~ /#{dval}/
+          #key exist and match with regexp
+          event.cancel
+          return
+        end
+      end
+    end
+    #######################
+    
+    ######ENRICHISSEMENT: add info db local, active info, ...######
+    #{"1": {file: path_db, db: {loaded by path db contains hash},"prefix": "prefix_...", filters: {field:regexp,...}, link: [["name_field_select_value_to_search_in_db",...],[WHOIS2,...]], "form_in_db": "https://$1$:$2$", if_empty: 'WHOIS'}, "filter_insert": [], "filter_noinsert": []}
+    # in db {'value_field_link': {name_info1: info1, name_info2: info2, ...}}
+    #probleme sur link lié a la construction d'un nom dans la base par exemple https://host:port (3 fields)
+    #2 eme cas quand l'on veut faire un whois sur plusieurs field: champs1 et champs2
+    #create var for add new field name (for check drop)
+    #choose order for link by enrichissment ex: infoclient -> IP (get MAC by db ip2mac) and second time get info by mac
+    new_field_enr = []
+    #refresh db
+    unless @disable_enr
+      if @next_refresh_enr < tnow
+        if @load_statut_enr == true
+          @load_statut_enr = false
+          save_dbs_enr # save db with news data response -TODO  -> 1 verify if db change (md5 hash) if no change save, if change... create diff with save!
+          #load_db_enr #load - use save for load too
+          @next_refresh_enr = tnow + @refresh_interval_enr
+          @load_statut_enr = true
+        end
+      end
+      sleep(1) until @load_statut_enr
+    end
+    #check if db is not empty
+    if not @db_enr.empty? and event.get(@noapply_sig_enr).nil? and not @disable_enr
+      if event.get(@field_enr).is_a?(Array)
+        #check response by response
+        for respo in event.get(@field_enr)
+          respo.each do |rkey,rval| #{rval['if_empty'] => {"id": rkey.to_s, "field": lval.to_s}}
+            next if rval['id'].nil? or rval['field'].nil? or rval['name_in_db'].nil? or rval['response'].nil? or @db_enr[rval['id'].to_s].nil?
+            #add in event
+            rval['response'].each do |xk,xval|
+              next if xval.empty? or @db_enr[rval['id'].to_s]["filter_noinsert"].include?(xk) or (not @db_enr[rval['id'].to_s]["filter_insert"].include?(xk) and not @db_enr[rval['id'].to_s]["filter_insert"].empty? and @db_enr[rval['id'].to_s]["filter_noinsert"].empty?)
+              #!!! overwrite if exist!!!
+              event.set(@db_enr[rval['id'].to_s]['prefix'].to_s+xk.to_s,xval)
+              #add in "FIELD_TEMP_ENR_DROP_NEW"
+              if event.get("FIELD_TEMP_ENR_DROP_NEW").nil?
+                 event.set("FIELD_TEMP_ENR_DROP_NEW",[(@db_enr[rval['id'].to_s]['prefix'].to_s+xk.to_s)])
+              else
+                 event.set("FIELD_TEMP_ENR_DROP_NEW",event.get("FIELD_TEMP_ENR_DROP_NEW")+[(@db_enr[rval['id'].to_s]['prefix'].to_s+xk.to_s)])
+              end
+            end
+            #add info in db
+            if rval['name_in_db'].empty? and rval['response'].is_a?(Hash) and not rval['response'].empty?
+              @db_enr[rval['id'].to_s]['db'][rval['name_in_db'].to_s] = rval['response']
+            end
+          end
+        end
+        #clean event
+        event.remove(@field_enr)
+      else
+        #check rule by rule
+        eventK = event.to_hash.keys
+        @db_enr.each do |rkey,rval|
+          # rule by rule
+          #check filter
+          #chekc is all keys present in event
+          inter = rval['filters'].keys & eventK
+          #check if fields rule present in event
+          if inter.length == rval['filters'].keys.length
+            #field present
+            #check filed by field
+            sig_add = {}
+            check_sig=false
+            for kfield in inter
+              check_sig=false
+              # field X -- check type
+              if event.get(kfield).is_a?(Array)
+                #array type
+                # if rule value regexp is Array?
+                if rval['filters'][kfield].is_a?(Array)
+                  for regexp in rval['filters'][kfield]
+                    check_sig=false
+                    for elem in event.get(kfield)
+                      match = Regexp.new(regexp, nil, 'n').match(elem.to_s)
+                      if not match.nil?
+                        check_sig=true
+                        break
+                      end
+                    end
+                    break unless check_sig
+                  end
+                else
+                  #rule not array
+                  for elem in event.get(kfield)
+                    match = Regexp.new(rval['filters'][kfield], nil, 'n').match(elem.to_s)
+                    if not match.nil?
+                      check_sig=true
+                      break
+                    end
+                  end
+                end
+              else
+                #other type
+                # if rule value regexp is Array?
+                if rval['filters'][kfield].is_a?(Array)
+                  #array
+                  for regexp in rval['filters'][kfield]
+                    match = Regexp.new(regexp, nil, 'n').match(event.get(kfield).to_s)
+                    if not match.nil?
+                      sig_add[kfield.to_s]="Regexp found #{match}"
+                      check_sig=true
+                      next
+                    end
+                    break unless check_sig
+                  end
+                else
+                  #other
+                  match = Regexp.new(rval['filters'][kfield], nil, 'n').match(event.get(kfield).to_s)
+                  if not match.nil?
+                    check_sig=true
+                    next
+                  end
+                end
+              end
+              break unless check_sig
+            end
+            #check if filters match
+            if check_sig
+              #matched
+              #check if link present in event & db & link not empty
+              next if rval['link'].empty?
+              next if rval['form_in_db'].empty?
+              lkey=rval['form_in_db'].dup
+              pnext=false
+              cnt_e=0
+              for lval in rval['link']
+                cnt_e+=1
+                if event.get(lval.to_s).nil?
+                  pnext=true
+                  break
+                else
+                  #create dbkey
+                  lkey.gsub! '$'+cnt_e.to_s+'$', event.get(lval.to_s)
+                end
+              end
+              next if pnext
+              next if cnt_e != rval['link'].length or lkey =~ /\$\d+\$/
+              if not rval['db'][lkey.to_s].is_a?(Hash)
+                #if not present and must present, then send to server active enrichissement and wait to return 
+                #check if if_empty exist?
+                if rval['if_empty'].is_a?(String) and not rval['if_empty'].empty?
+                  #send requets to server for resolve information
+                  #Add field request_resolv: [{WHOIS: {"id": id_rule, "field": field_name}},{SSL: {"id": id_rule, "field": field_name}}]
+                  #TODO verify number of element in form and link
+                  request_enr = {rval['if_empty'] => {"id" => rkey.to_s, "field" => rval['link'], "name_in_db" => lkey}}
+                  if event.get(@field_enr).nil?
+                    event.set(@field_enr,[request_enr])
+                  else
+                    event.set(@field_enr,event.get(@field_enr)+[request_enr])
+                  end
+                  #send to server (at end, for possible add multi request by rule
+                end
+              else
+                #if present add
+                next if not rval['prefix'].is_a?(String) or rval['prefix'].empty?
+                #"filter_insert": [], "filter_noinsert": []
+                rval['db'][lkey].each do |xk,xval|
+                  next if xval.empty? or rval["filter_noinsert"].include?(xk) or (not rval["filter_insert"].include?(xk) and not rval["filter_insert"].empty? and rval["filter_noinsert"].empty?)
+                  #!!! overwrite if exist!!!
+                  event.set(rval['prefix'].to_s+xk.to_s,xval)
+                  #add in new_field_enr
+                  new_field_enr.push(*(rval['prefix'].to_s+xk.to_s))
+                end
+              end            
+            end
+          end
+        end
+        event.tag(@enr_tag_response) if not event.get(@field_enr).nil?
+        event.set("FIELD_TEMP_ENR_DROP_NEW",new_field_enr)
+        #when event.get(@field_enr) is set hten not check apply on event, in configuration add to send to server enrichment which resend after add informations
+      end
+    end
+    #######################
+    
+    ######DROP SECOND######
+    ## JUST CHECK NEW FIELD (created by enr)
+    #check if db not empty 
+    if not @drop_db.empty? and event.get(@noapply_sig_dropdb).nil? and not @disable_drop and event.get(@field_enr).nil? and not event.get("FIELD_TEMP_ENR_DROP_NEW").nil?
+      for nfield in event.get("FIELD_TEMP_ENR_DROP_NEW")
+        if @drop_db[nfield] and event.get(nfield).is_a?(String) and event.get(nfield) =~ /#{@drop_db[nfield]}/
+          #key exist and match with regexp
+          event.cancel
+          return
+        end
+      end
+    end
+    event.remove("FIELD_TEMP_ENR_DROP_NEW")
+    #######################
+    
+    ######New Value USE######
+    #reshresh conf & save db
+    unless @disable_nv
+      if @next_refresh_dbnv < tnow
+        if @save_statut_nv == true
+          @save_statut_nv = false
+          save_db_nv
+          @next_refresh_dbnv = tnow + @save_interval_dbnv
+          @save_statut_nv = true
+        end
+      end
+      if @next_refresh_confnv < tnow
+        if @load_statut_nv == true
+          @load_statut_nv = false
+          load_conf_nv
+          @next_refresh_confnv = tnow + @refresh_interval_confnv
+          @load_statut_nv = true
+        end
+      end
+      sleep(1) until @load_statut_nv
+    end
+    #check if db &conf are not empty + select_fp exist
+    if not @nv_rules.empty? and @nv_rules['rules'].is_a?(Array) and not @nv_db.empty? and event.get(@noapply_sig_nv).nil? and not @disable_nv and event.get(@field_enr).nil?
+      #check all rules
+      for rule in @nv_rules['rules']
+        #if rule exist in event?
+        if event.get(rule.to_s)
+          #yes
+          #event content type Array
+          if event.get(rule.to_s).is_a?(Array)
+            for elem in event.get(rule.to_s)
+              if elem.is_a?(String) or elem.is_a?(Numeric)
+                if not @nv_db[rule.to_s].include?(elem)
+                  #new value => add
+                  @nv_db[rule.to_s].push(*elem)
+                  event.set(@target_nv+rule.to_s, elem.to_s)
+                end
+              end
+            end   
+          #event content type String or Numeric        
+          elsif event.get(rule.to_s).is_a?(String) or event.get(rule.to_s).is_a?(Numeric) 
+            if not @nv_db[rule.to_s].include?(event.get(rule.to_s))
+              #new value => add
+              @nv_db[rule.to_s].push(*event.get(rule.to_s))
+              event.set(@target_nv+rule.to_s, event.get(rule.to_s).to_s)
+            end
+          end
+        end
+      end
+    end
+    #########################
+    
+    ######BL REPUTATION USE######
+    #reshresh conf & save db
+    unless @disable_bl
+      if @next_refresh_confbl < tnow
+        if @load_statut_bl == true
+          @load_statut_bl = false
+          load_conf_bl
+          @next_refresh_confbl = tnow + @refresh_interval_confbl
+          @load_statut_bl = true
+        end
+      end
+      sleep(1) until @load_statut_bl
+    end
+    #check if db &conf are not empty + select_fp exist
+    if not @bl_rules.empty? and not @bl_db.empty? and event.get(@noapply_sig_bl).nil? and not @disable_bl and event.get(@field_enr).nil?
+      #bl_rules: {fieldx: {dbs: [file_name,...], category: , note: X, id: X}}
+      #bl_db: {file_name: [IPs]}
+      #rule by rule
+      @bl_rules.each do |fkey,fval|
+        #veirfy field exist
+        if not event.get(fkey).nil?
+          #verify field contains IP
+          ip = ""
+          next if not ip = IPAddr.new(event.get(fkey).to_s) rescue false
+          for dbbl in fval['dbs']
+            #if @bl_db[dbbl].include?(ip)
+            if @bl_db[dbbl].any?{|block| block === ip}
+              #FIELD FIND IN DB BL REPUTATION
+              #ADD SCORE & ID & CAT
+              unless event.get(@targetnote).nil?
+                if event.get(@targetnote) < fval['note']
+                  event.set(@targetnote, detected_sig_note)
+                end
+              else
+                event.set(@targetnote, fval['note'])
+              end
+              unless event.get(@targetname_bl).nil?
+                event.set(@targetname_bl, event.get(@targetname_bl) + [fval['category']])
+              else
+                event.set(@targetname_bl, [fval['category']])
+              end
+              unless event.get(@targetid).nil?
+                event.set(@targetid, event.get(@targetid) + [fval['id']])
+              else
+                event.set(@targetid, [fval['id']])
+              end
+            end
+          end
+        end
+      end
+    end
+    #########################
+    
+    ######IOC SEARCH######
+    #refresh db
+    unless @disable_ioc
+      if @next_refresh_dbioc < tnow
+        if @load_statut_ioc == true
+          @load_statut_ioc = false
+          load_conf_ioc
+          load_db_ioc
+          @next_refresh_dbioc = tnow + @refresh_interval_dbioc
+          @load_statut_ioc = true
+        end
+      end
+      sleep(1) until @load_statut_ioc
+    end
+    #check db not empty
+    if not @ioc_rules.empty? and not @ioc_db.empty? and event.get(@noapply_ioc).nil? and not @disable_ioc and event.get(@field_enr).nil?
+      detected_ioc = Array.new
+      detected_ioc_count = 0
+      detected_ioc_name = Array.new
+      detected_ioc_id = Array.new
+      detected_ioc_note = 0
+      #verify ioc by rules
+      @ioc_rules.each do |rkey,rval|
+        #rule by rule
+        if rval.is_a?(Array) and not rkey =~ /_downcase$|_iocnote$|_iocid$/ and @ioc_db[rkey.to_s]
+          list_search = []
+          #create list value by rule to check ioc
+          for elemvalue in rval
+            #Collect value of field name contains "elemvalue"
+            hash_tmp = event.to_hash.select{|k,v| (k.to_s).include? elemvalue }
+            if hash_tmp.values.any?
+            #hash not empty
+              if list_search.empty?
+                if @ioc_rules[rkey+'_downcase'] 
+                  #case compare by downcase
+                  list_search = hash_tmp.values.map!(&:downcase)
+                else
+                  #case normaly compare
+                  list_search = hash_tmp.values
+                end
+              else
+                if @ioc_rules[rkey+'_downcase'] 
+                  #case compare by downcase
+                  list_search = list_search + hash_tmp.values.map!(&:downcase)
+                else
+                  #case normaly compare
+                  list_search = list_search + hash_tmp.values
+                end
+              end
+            end
+          end
+          #compare list_value extract of event for one case of ioc and db_ioc -- intersection
+          inter=list_search & @ioc_db[rkey.to_s]
+          if inter.any?
+            #value(s) find
+            ioc_add = {rkey.to_s => inter}
+            detected_ioc_name.push(*rkey.to_s)
+            detected_ioc.push(*ioc_add)
+            detected_ioc_count = detected_ioc_count + 1
+            detected_ioc_id.push(*@ioc_rules[rkey+'_iocid'])
+            if detected_ioc_note < @ioc_rules[rkey+'_iocnote']
+              detected_ioc_note = @ioc_rules[rkey+'_iocnote']
+            end
+            ioc_add.clear
+          end
+        end
+      end
+      #check if ioc find
+      if detected_ioc.any?
+        #ioc find, add information in event (count, name, id, note)
+        unless event.get(@target_ioc).nil?
+          event.set(@target_ioc, event.get(@target_ioc) + detected_ioc)
+        else
+          event.set(@target_ioc, detected_ioc)
+        end
+        unless event.get(@targetnum_ioc).nil?
+          event.set(@targetnum_ioc, event.get(@targetnum_ioc) + detected_ioc_count)
+        else
+          event.set(@targetnum_ioc, detected_ioc_count)
+        end
+        unless event.get(@targetname_ioc).nil?
+          event.set(@targetname_ioc, event.get(@targetname_ioc) + detected_ioc_name)
+        else
+          event.set(@targetname_ioc, detected_ioc_name)
+        end
+        unless event.get(@targetid).nil?
+          event.set(@targetid, event.get(@targetid) + detected_ioc_id)
+        else
+          event.set(@targetid, detected_ioc_id)
+        end
+        unless event.get(@targetnote).nil?
+          if event.get(@targetnote) < detected_ioc_note
+            event.set(@targetnote, detected_ioc_note)
+          end
+        else
+          event.set(@targetnote, detected_ioc_note)
+        end
+      end
+    end
+    ######################
+    
+    ######SIG SEARCH######
+    unless @disable_sig
+      if @next_refresh_confrules < tnow
+        if @load_statut_rules == true
+          @load_statut_rules = false
+          load_conf_rules_sig
+          save_db_ioclocal
+          clean_db_sigfreq(tnow)
+          @next_refresh_confrules = tnow + @refresh_interval_confrules
+          @load_statut_rules = true
+        end
+      end
+      sleep(1) until @load_statut_rules
+    end
+    if not @sig_db.empty? and event.get(@noapply_sig_rules).nil? and not @disable_sig and event.get(@field_enr).nil?
+      #create var local for all rules check
+      detected_sig = Array.new
+      detected_sig_name = Array.new
+      detected_sig_tags = Array.new
+      detected_sig_count = 0
+      detected_sig_note = 0
+      detected_sig_id = Array.new
+      detected_sig_id_corre = Array.new
+      type_sig = 0
+      type_obl = 0
+      #TODO: 
+      #!!!Integration règles SIGMA!!!
+      # News rules format
+      #{"rule_metadata": 
+      #  {"type":2,"note":2,"name":"Referer FIELD not present","id":4, "tags": ["attack.defense_evasion"],}, 
+      #  "rule_conditions": {
+      #         "type":[{"motif":["squid"], 'lid': 1},
+      #         "uri_proto":[{"notregexp":["tunnel"], 'lid': 2}],
+      #         "referer_host":[{"false":{}, 'lid': 3}]
+      #        }
+      #  "rule_expression": "(1 AND 2) OR 3"
+      #} 
+      # get list of all name field present in event
+      eventK = event.to_hash.keys
+      #check all rules
+      #keep result of each conditions test
+      conditions_result={}
+      (0..@sig_db_array_len).each do |i|
+        #################################
+        ########NEW CODE#################
+        #If expression not use OR, then you can check if all fields is present else next!
+        unless @sig_db['rules'][i]['rule_metadata']['parse']
+          next
+        end
+        unless @sig_db['rules'][i]['rule_expression'].include? "OR"
+          verif=@sig_db_array[i].length
+          inter=@sig_db_array[i] & eventK
+          if inter.length == verif
+            next
+          end
+        end
+        #diff with old version sig.rb => not check if field exist, if field not exit then put "false" to LID
+        #Check if field of condition exist in event
+        result_lid={}
+        sig_add = {"Rules" => "Detected rule at emplacement: #{i} (not id)"}
+        sig_add["note"] = 0
+        for kfield in @sig_db_array[i]
+          if eventK.include? 'kfield'
+            #OK field exist, you can check conditions
+            @sig_db['rules'][i]['rule_conditions'][kfield].each do |condx|
+              result_lid[condx['lid']]=false
+              #BEGIN : CHECK MOTIF CONDITION
+              unless condx['motif'].nil?
+                if conditions_result.key?(kfield+'||||'+'motif'+"||||"+condx['motif'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'motif'+"||||"+condx['motif'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(Array)
+                  l_tmp = event.get(kfield).flatten(10)
+                  inter = l_tmp & condx['motif']
+                  if inter.length != 0
+                    sig_add[kfield.to_s]="motif found: #{inter}"
+                    result_lid[condx['lid']]=true
+                  end
+                elsif condx['motif'].include? event.get(kfield)
+                  sig_add[kfield.to_s]="motif found #{event.get(kfield)}"
+                  result_lid[condx['lid']]=true
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'motif'+"||||"+condx['motif'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK MOTIF CONDITION
+              #BEGIN : CHECK BY Compare value of two fields
+              unless condx['compope'].nil?
+                if conditions_result.key?(kfield+'||||'+'compope'+"||||"+condx['compope'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'compope'+"||||"+condx['compope'].to_s]
+                  next
+                end
+                condx['compope'].each do |xk,xval|
+                  if event.get(xk)
+                    if event.get(xk).is_a?(Numeric)
+                      unless condx['compope'][xk].nil?
+                        if event.get(kfield).is_a?(Numeric)
+                          if not condx['compope'][xk]['egal'].nil?
+                            if event.get(kfield) == event.get(xk)
+                              sig_add[kfield.to_s]="Fields Value numeric  #{event.get(kfield)} == #{event.get(xk)} found"
+                              result_lid[condx['lid']]=true
+                              break
+                            end
+                          elsif not condx['compope'][xk]['sup'].nil?
+                            if event.get(kfield) > event.get(xk)
+                              sig_add[kfield.to_s]="Fields Value numeric  #{event.get(kfield)} > #{event.get(xk)} found"
+                              result_lid[condx['lid']]=true
+                              break
+                            end
+                          elsif not condx['compope'][xk]['inf'].nil?
+                            if event.get(kfield) < event.get(xk)
+                              sig_add[kfield.to_s]="Fields Value numeric  #{event.get(kfield)} < #{event.get(xk)} found"
+                              result_lid[condx['lid']]=true
+                              break
+                            end
+                          elsif not condx['compope'][xk]['diff'].nil?
+                            if event.get(kfield) != event.get(xk)
+                              sig_add[kfield.to_s]="Fields Value numeric  #{event.get(kfield)} != #{event.get(xk)} found"
+                              result_lid[condx['lid']]=true
+                              break
+                            end
+                          end
+                        end
+                      end
+                    elsif event.get(xk).is_a?(String)
+                      unless condx['compope'][xk].nil?
+                        if event.get(kfield).is_a?(String)
+                          if not condx['compope'][xk]['egal'].nil?
+                            if event.get(kfield).eql?(event.get(xk))
+                              sig_add[kfield.to_s]="Fields Value String  #{event.get(kfield)} == #{event.get(xk)} found"
+                              result_lid[condx['lid']]=true
+                              break
+                            end
+                          elsif not condx['compope'][xk]['diff'].nil?
+                            if not event.get(kfield).eql?(event.get(xk))
+                              sig_add[kfield.to_s]="Fields Value String  #{event.get(kfield)} != #{event.get(xk)} found"
+                              result_lid[condx['lid']]=true
+                              break
+                            end
+                          end
+                        end
+                      end
+                    #add elsif event.get(kfield).is_a?(Array) ?
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'compope'+"||||"+condx['compope'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY Compare value of two fields
+              #BEGIN : CHECK BY numeric operation
+              unless condx['numope'].nil?
+                if conditions_result.key?(kfield+'||||'+'numope'+"||||"+condx['numope'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'numope'+"||||"+condx['numope'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(Numeric)
+                  if not condx['numope']['egal'].nil?
+                    if event.get(kfield) == @sig_db['rules'][i][kfield]['numope']['egal']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield)} == #{condx['numope']['egal']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['numope']['sup'].nil?
+                    if event.get(kfield) > condx['numope']['sup']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield)} > #{condx['numope']['sup']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['numope']['inf'].nil?
+                    if event.get(kfield) < condx['numope']['inf']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield)} < #{condx['numope']['inf']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['numope']['diff'].nil?
+                    if event.get(kfield) != condx['numope']['diff']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield)} != #{condx['numope']['diff']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'numope'+"||||"+condx['numope'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY numeric operation
+              #BEGIN : CHECK BY date
+              unless condx['date'].nil?
+                if conditions_result.key?(kfield+'||||'+'date'+"||||"+condx['date'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'date'+"||||"+condx['date'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(String) and not event.get(kfield).nil? and event.get(kfield).length > 0
+                  if not condx['date']['egal'].nil?
+                    if Time.parse(event.get(kfield)) == (tnow - condx['date']['egal'])
+                      sig_add[kfield.to_s]="Value date  #{event.get(kfield)} == #{condx['date']['egal']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['date']['sup'].nil?
+                    if Time.parse(event.get(kfield)) > (tnow - condx['date']['sup'])
+                      sig_add[kfield.to_s]="Value date  #{event.get(kfield)} > #{condx['date']['sup']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['date']['inf'].nil?
+                    if Time.parse(event.get(kfield)) < (tnow - condx['date']['inf'])
+                      sig_add[kfield.to_s]="Value date  #{event.get(kfield)} < #{condx['date']['inf']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['date']['diff'].nil?
+                    if Time.parse(event.get(kfield)) != (tnow - condx['date']['diff'])
+                      sig_add[kfield.to_s]="Value date  #{event.get(kfield)} != #{condx['date']['diff']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  end
+                elsif event.get(kfield).is_a?(Array) and not event.get(kfield).nil? and event.get(kfield).length > 0
+                  for elem_list in event.get(kfield)
+                    if elem_list.is_a?(String)
+                      if not condx['date']['egal'].nil?
+                        if Time.parse(elem_list) == (tnow - condx['date']['egal'])
+                          sig_add[kfield.to_s]="Value date  #{event.get(kfield)} == #{condx['date']['egal']} found"
+                          result_lid[condx['lid']]=true
+                          break
+                        end
+                      elsif not condx['date']['sup'].nil?
+                        if Time.parse(elem_list) > (tnow - condx['date']['sup'])
+                          sig_add[kfield.to_s]="Value date  #{event.get(kfield)} > #{condx['date']['sup']} found"
+                          result_lid[condx['lid']]=true
+                          break
+                        end
+                      elsif not condx['date']['inf'].nil?
+                        if Time.parse(elem_list) < (tnow - condx['date']['inf'])
+                          sig_add[kfield.to_s]="Value date  #{event.get(kfield)} < #{condx['date']['inf']} found"
+                          result_lid[condx['lid']]=true
+                          break
+                        end
+                      elsif not @condx['date']['diff'].nil?
+                        if Time.parse(elem_list) != (tnow - condx['date']['diff'])
+                          sig_add[kfield.to_s]="Value date  #{event.get(kfield)} != #{condx['date']['diff']} found"
+                          result_lid[condx['lid']]=true
+                          break
+                        end
+                      end
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'date'+"||||"+condx['date'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY date
+              #BEGIN : CHECK BY hour
+              unless condx['hour'].nil?
+                if conditions_result.key?(kfield+'||||'+'hour'+"||||"+condx['hour'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'hour'+"||||"+condx['hour'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(String) and not event.get(kfield).nil?
+                  if not condx['hour']['egal'].nil?
+                    if Time.parse(event.get(kfield)).hour.to_i == condx['hour']['egal'].to_i
+                      sig_add[kfield.to_s]="Value hour  #{event.get(kfield)} == #{condx['hour']['egal'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['hour']['sup'].nil?
+                    if Time.parse(event.get(kfield)).hour.to_i > condx['hour']['sup'].to_i
+                      sig_add[kfield.to_s]="Value hour  #{event.get(kfield)} > #{condx['hour']['sup'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['hour']['inf'].nil?
+                    if Time.parse(event.get(kfield)).hour.to_i < condx['hour']['inf'].to_i
+                      sig_add[kfield.to_s]="Value hour  #{event.get(kfield)} < #{condx['hour']['inf'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['hour']['diff'].nil?
+                    if Time.parse(event.get(kfield)).hour.to_i != condx['hour']['diff'].to_i
+                      sig_add[kfield.to_s]="Value hour  #{event.get(kfield)} != #{condx['hour']['diff'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'hour'+"||||"+condx['hour'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY hour
+              #BEGIN : CHECK BY day
+              unless condx['day'].nil?
+                if conditions_result.key?(kfield+'||||'+'day'+"||||"+condx['day'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'day'+"||||"+condx['day'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(String) and not event.get(kfield).nil?
+                  if not condx['day']['egal'].nil?
+                    if Time.parse(event.get(kfield)).wday.to_i == condx['day']['egal'].to_i
+                      sig_add[kfield.to_s]="Value day  #{event.get(kfield)} == #{condx['day']['egal'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['day']['sup'].nil?
+                    if Time.parse(event.get(kfield)).wday.to_i > condx['day']['sup'].to_i
+                      sig_add[kfield.to_s]="Value day  #{event.get(kfield)} > #{condx['day']['sup'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['day']['inf'].nil?
+                    if Time.parse(event.get(kfield)).wday.to_i < condx['day']['inf'].to_i
+                      sig_add[kfield.to_s]="Value day  #{event.get(kfield)} < #{condx['day']['inf'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['day']['diff'].nil?
+                    if Time.parse(event.get(kfield)).wday.to_i != condx['day']['diff'].to_i
+                      sig_add[kfield.to_s]="Value day  #{event.get(kfield)} != #{condx['day']['diff'].to_s} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'day'+"||||"+condx['day'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY day
+              #BEGIN : CHECK BY ip adress
+              unless condx['ipaddr'].nil?
+                if conditions_result.key?(kfield+'||||'+'ipaddr'+"||||"+condx['ipaddr'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'ipaddr'+"||||"+condx['ipaddr'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(String) and not event.get(kfield).nil?
+                  if not condx['ipaddr']['egal'].nil?
+                    net = IPAddr.new(condx['ipaddr']['egal'])
+                    if net===event.get(kfield).to_s
+                      sig_add[kfield.to_s]="Value IP address #{event.get(kfield)} != #{condx['ipaddr']['egal']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['ipaddr']['diff'].nil?
+                    net = IPAddr.new(condx['ipaddr']['diff'])
+                    if not net===event.get(kfield).to_s
+                      sig_add[kfield.to_s]="Value IP address #{event.get(kfield)} != #{condx['ipaddr']['diff']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'ipaddr'+"||||"+condx['ipaddr'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY ip adress
+              #BEGIN : CHECK BY size field operation
+              unless condx['sizeope'].nil?
+                if conditions_result.key?(kfield+'||||'+'sizeope'+"||||"+condx['sizeope'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'sizeope'+"||||"+condx['sizeope'].to_s]
+                  next
+                end
+                if event.get(kfield).is_a?(String) and not event.get(kfield).nil?
+                  if not condx['sizeope']['egal'].nil?
+                    if event.get(kfield).length == condx['sizeope']['egal']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield).length} == #{condx['sizeope']['egal']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['sizeope']['sup'].nil?
+                    if event.get(kfield).length > condx['sizeope']['sup']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield).length} > #{condx['sizeope']['sup']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['sizeope']['inf'].nil?
+                    if event.get(kfield).length < condx['sizeope']['inf']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield).length} < #{condx['sizeope']['inf']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  elsif not condx['sizeope']['diff'].nil?
+                    if event.get(kfield).length != condx['sizeope']['diff']
+                      sig_add[kfield.to_s]="Value numeric  #{event.get(kfield).length} != #{condx['sizeope']['diff']} found"
+                      result_lid[condx['lid']]=true
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'sizeope'+"||||"+condx['sizeope'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY size field operation
+              #BEGIN : CHECK BY regexp
+              unless condx['regexp'].nil?
+                if conditions_result.key?(kfield+'||||'+'regexp'+"||||"+condx['regexp'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'regexp'+"||||"+condx['regexp'].to_s]
+                  next
+                end
+                for regexp in condx['regexp']
+                  if event.get(kfield).is_a?(String) and not event.get(kfield).nil?
+                    match = Regexp.new(regexp, nil, 'n').match(event.get(kfield))
+                    if not match.nil?
+                      sig_add[kfield.to_s]="Regexp found #{match}"
+                      result_lid[condx['lid']]=true
+                      break
+                    end
+                  elsif event.get(kfield).is_a?(Array)
+                    for elem_list in event.get(kfield)
+                      if elem_list.is_a?(String)
+                        match = Regexp.new(regexp, nil, 'n').match(elem_list)
+                        if not match.nil?
+                          sig_add[kfield.to_s]="Regexp found #{match}"
+                          result_lid[condx['lid']]=true
+                          break
+                        end
+                      end
+                    end
+                  end
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'regexp'+"||||"+condx['regexp'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY regexp
+              #BEGIN : CHECK BY regexp excluse (not present)
+              unless condx['notregexp'].nil?
+                if conditions_result.key?(kfield+'||||'+'notregexp'+"||||"+condx['notregexp'].to_s)
+                  result_lid[condx['lid']]=conditions_result[kfield+'||||'+'notregexp'+"||||"+condx['notregexp'].to_s]
+                  next
+                end
+                regexplen=condx['notregexp'].length
+                veriflen=0
+                for regexp in condx['notregexp']
+                  if event.get(kfield).is_a?(String)
+                    match = Regexp.new(regexp, nil, 'n').match(event.get(kfield))
+                    if match.nil?
+                      veriflen=veriflen+1
+                    end
+                  elsif event.get(kfield).is_a?(Array)
+                    for elem_list in event.get(kfield)
+                      if elem_list.is_a?(String)
+                        match = Regexp.new(regexp, nil, 'n').match(elem_list)
+                        if match.nil?
+                          veriflen=veriflen+1
+                        end
+                      end
+                    end  
+                  end
+                end
+                if veriflen==regexplen
+                  sig_add[kfield.to_s]="Not Regexp present: OK"
+                  result_lid[condx['lid']]=true
+                end
+                #sav conditions result for optimiz others rules use same conditions
+                conditions_result[kfield+'||||'+'notregexp'+"||||"+condx['notregexp'].to_s]=result_lid[condx['lid']]
+                #if condition find, go to next condition
+                next
+              end
+              #END : CHECK BY regexp excluse (not present)
+            #END loop on conditions of one field
+            end
+          else
+            result_lid[@sig_db['rules'][i]['rule_conditions'][kfield].each do |kfalse|
+            #BEGIN : CHECK FALSE CONDITION
+            if kfalse.key?('false')
+              result_lid[kfalse['lid']]=true
+            #END : CHECK FALSE CONDITION
+            #field not exist, LID == False
+            else
+              result_lid[kfalse['lid']]=false
+            end
+          end
+        end
+        #check expression on resultat of conditions
+        #@sig_db['rules'][i]['rule_expression']
+        #replace number by value
+        exp_eval=@sig_db['rules'][i]['rule_expression'].dup
+        result_lid.each do |lid,reslid|
+            exp_eval=exp_eval.gsub(/(^| )#{lid.to_s}($| )/, ' '+reslid.to_s+' ')
+        end
+        #eval expression
+        begin:
+          result_exp=eval(exp_eval.lstrip.chop)
+        rescue:
+          result_exp=false
+          @logger.error('Error in SIG for eval expression of sig:'+@sig_db['rules'][i]['rule_metadata']['id'])
+        end
+        if not (result_exp.is_a?(TrueClass) or result_exp.is_a?(FalseClass))
+          result_exp=false
+        end
+        #check expression result for known if rule match (true) or not (false)
+        if result_exp
+          #Rule matched!
+          #check SIG RESULT FIND and get information name, type, modefp, note, id
+          if @sig_db['rules'][i]['rule_metadata']['modeFP'].nil?
+            if @sig_db['rules'][i]['rule_metadata']['modeFP'] == true
+                #@logger.warn("DROP EVENT FP:", :string => sig_add["name_sig"])
+                sig_add.clear
+                detected_sig.clear
+                detected_sig_count=0
+                event.cancel
+                return
+              end
+            end
+          end
+          if @sig_db['rules'][i]['rule_metadata']['id'].is_a?(Numeric)
+            sig_add["id"] = @sig_db['rules'][i][kfield]['id'].to_i
+          else
+            #all information must to be on same field
+            next
+          end
+          if @sig_db['rules'][i]['rule_metadata']['name'].is_a?(String)
+            if sig_add["name_sig"].nil?
+              sig_add["name_sig"] = @sig_db['rules'][i]['rule_metadata']['name']
+            else
+              sig_add["name_sig"] = sig_add["name_sig"] + @sig_db['rules'][i]['rule_metadata']['name']
+            end
+          end
+          if @sig_db['rules'][i]['rule_metadata']['type'].is_a?(Numeric)
+            if @sig_db['rules'][i]['rule_metadata']['type'] == 2
+              type_sig = type_sig + 1
+            end
+            if @sig_db['rules'][i]['rule_metadata']['type'] == 1
+              type_obl = type_obl + 1
+            end
+          end
+          if @sig_db['rules'][i]['rule_metadata']['note'].is_a?(Numeric)
+            if sig_add["note"].nil?
+              sig_add["note"] = @sig_db['rules'][i]['rule_metadata']['note'].to_s
+            else
+              sig_add["note"] = (sig_add["note"].to_i + @sig_db['rules'][i]['rule_metadata']['note'].to_i).to_s
+            end
+          end
+          #"freq_field:" [field,field,field,field],"freq_delay":60s,freq_count: 3, freq_resettime: 3600s, correlate_change_fieldvalue: []
+          #use for correlate multi event type with correlate_change_fieldvalue
+          # or use for freq select, by exemple brute force without correlate_change_fieldvalue
+          if @sig_db['rules'][i]['rule_metadata']['freq_field'].is_a?(Array) and @sig_db['rules'][i]['rule_metadata']['freq_delay'].is_a?(Interger) and @sig_db['rules'][i]['rule_metadata']['freq_resettime'].is_a?(Integer) and @sig_db['rules'][i]['rule_metadata']['freq_count'].is_a?(Integer)
+            sig_add["freq_field"] = @sig_db['rules'][i]['rule_metadata']['freq_field']
+            sig_add["freq_delay"] = @sig_db['rules'][i]['rule_metadata']['freq_delay']
+            sig_add["freq_count"] = @sig_db['rules'][i]['rule_metadata']['freq_count']
+            sig_add["freq_resettime"] = @sig_db['rules'][i]['rule_metadata']['freq_resettime']
+            if @sig_db['rules'][i]['rule_metadata']['correlate_change_fieldvalue'].is_a?(Array) and not @sig_db['rules'][i]['rule_metadata']['correlate_change_fieldvalue'].empty?
+              sig_add["correlate_change_fieldvalue"] = @sig_db['rules'][i]['rule_metadata']['correlate_change_fieldvalue']
+            end
+          end
+          #detected freq & correlate
+          if sig_add["freq_field"]
+            #get id sig for know if you create alert or no
+            #example if just id match then don't create alert
+            detected_sig_id_corre.push(*sig_add["id"])
+            #create hash of event
+            fields_value=""
+            for fx in sig_add["freq_field"]
+              if event.get(fx)
+                fields_value = fields_value + event.get(fx).to_s.downcase
+              end
+            end
+            hash_field = OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_value.to_s).force_encoding(Encoding::UTF_8)
+            if @sig_db_freq[hash_field]     
+              #hash in db
+              #verify if valid is false
+              if @sig_db_freq[hash_field]['valid'] == false
+                #ok hash not matched
+                #verify delay
+                if @sig_db_freq[hash_field]['delay'] < tnow
+                  #delay is out
+                  #restart of 0
+                  @sig_db_freq[hash_field]['count'] = 1
+                  @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_delay"]
+                  if sig_add["correlate_change_fieldvalue"]
+                    fields_corre_value=""
+                    @sig_db_freq[hash_field]['corre_value'] = []
+                    for fy in sig_add["freq_field"]
+                      if event.get(fy)
+                        fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
+                      end
+                    end
+                    @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8))
+                  end 
+                  @sig_db_freq[hash_field]['valid'] = false
+                else
+                  #ok count, because delay is valid
+                  #check if sig_add["correlate_change_fieldvalue"] is present
+                  hash_corre_value = ""
+                  if sig_add["correlate_change_fieldvalue"]
+                    fields_corre_value=""
+                    for fy in sig_add["freq_field"]
+                      if event.get(fy)
+                        fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
+                      end
+                    end
+                    hash_corre_value = OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8)
+                    if not @sig_db_freq[hash_field]['corre_value'].include?(hash_corre_value)
+                      #if correlate hash not exist count ++
+                      @sig_db_freq[hash_field]['count'] = @sig_db_freq[hash_field]['count'] + 1
+                      @sig_db_freq[hash_field]['corre_value'].push(*hash_corre_value)
+                    end
+                  else
+                    #no correlate
+                    @sig_db_freq[hash_field]['count'] = @sig_db_freq[hash_field]['count'] + 1
+                  end
+                  #verify if count reach count_value rule
+                  if @sig_db_freq[hash_field]['count'] >= sig_add["freq_resettime"]
+                    #valid sig
+                    @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_resettime"]
+                    @sig_db_freq[hash_field]['valid'] = true
+                    detected_sig_id_corre.clear
+                  end
+                end
+              else
+                #hash matched in past, verify if resettime is passed?
+                if @sig_db_freq[hash_field]['delay'] < tnow
+                  #delay is passed, restart to 0
+                  @sig_db_freq[hash_field]['count'] = 1
+                  if sig_add["correlate_change_fieldvalue"]
+                    @sig_db_freq[hash_field]['corre_value'] = []
+                    fields_corre_value=""
+                    for fy in sig_add["freq_field"]
+                      if event.get(fy)
+                        fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
+                      end
+                    end
+                    @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8))
+                  end
+                  @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_delay"]
+                  @sig_db_freq[hash_field]['valid'] = false
+                end
+              end
+            else
+              #new hash
+              @sig_db_freq[hash_field] = {}
+              @sig_db_freq[hash_field]['count'] = 1
+              if sig_add["correlate_change_fieldvalue"]
+                fields_corre_value=""
+                @sig_db_freq[hash_field]['corre_value'] = []
+                for fy in sig_add["freq_field"]
+                  if event.get(fy)
+                    fields_corre_value = fields_corre_value + event.get(fy).to_s.downcase
+                  end
+                end
+                @sig_db_freq[hash_field]['corre_value'].push(*OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA256.new, "SIG-PLUGIN-FREQ", fields_corre_value.to_s).force_encoding(Encoding::UTF_8))
+              end
+              @sig_db_freq[hash_field]['delay'] = tnow + sig_add["freq_delay"]
+              @sig_db_freq[hash_field]['valid'] = false
+            end
+          end
+          if @sig_db['rules'][i]['rule_metadata']['extract'].is_a?(Hash)
+            sig_add["extract"] = @sig_db['rules'][i]['rule_metadata']['extract']
+            sig_add["extract"].each do |ekey,eval|
+              if event.get(ekey) and @ioc_db_local
+                if @ioc_db_local[eval]
+                  unless @ioc_db_local[eval].include?(event.get(ekey))
+                    @ioc_db_local[eval].push(*event.get(ekey))
+                    sleep(1) until @load_statut_ioc
+                    @load_statut_ioc = false
+                    @ioc_db = @ioc_db.merge(db_tmp) {|key, first, second| first.is_a?(Array) && second.is_a?(Array) ? first | second : second }
+                    @load_statut_ioc = true
+                  end
+                else
+                  @ioc_db_local[eval] = []
+                  @ioc_db_local[eval].push(*event.get(ekey))
+                  sleep(1) until @load_statut_ioc
+                  @load_statut_ioc = false
+                  @ioc_db = @ioc_db.merge(db_tmp) {|key, first, second| first.is_a?(Array) && second.is_a?(Array) ? first | second : second }
+                  @load_statut_ioc = true
+                end
+              end
+            end
+          end
+          detected_sig.push(*sig_add)
+          #no continu if one rule match
+          if @check_stop 
+            detected_sig_count = 1
+            detected_sig_note = sig_add["note"].to_i
+            detected_sig_id.push(*sig_add["id"])
+            detected_sig_name.push(*sig_add["name_sig"])
+            break
+          else
+            detected_sig_count = detected_sig_count + 1
+            detected_sig_name.push(*sig_add["name_sig"])
+            detected_sig_id.push(*sig_add["id"])
+            if detected_sig_note < sig_add["note"].to_i
+              detected_sig_note = sig_add["note"].to_i
+            end
+          end
+        end
+        sig_add.clear
+      end
+      eventK.clear
+      #check if sig detected,  and add to @targetxxx_sig
+      #type_obl must > 0 because ==0 then no alerte type 1 && if not alerte type 1 then alerte type 2 is null
+      #second verification is type_sig < detected_sig_count, because type_sig contains type2 and result must < all sig detected (detected_sig_count) - because 1 rules min type 1 must detected
+      if detected_sig.any? and type_sig < detected_sig_count and type_obl > 0
+        #verify if sig detecte not just rule correlate rule match (without normal rule)
+        if detected_sig_id != detected_sig_id_corre
+          unless event.get(@target_sig).nil?
+            event.set(@target_sig, event.get(@target_sig) + detected_sig) 
+          else
+            event.set(@target_sig, detected_sig)
+          end
+          unless event.get(@targetnum_sig).nil?
+            event.set(@targetnum_sig, event.get(@targetnum_sig) + detected_sig_count)
+          else
+            event.set(@targetnum_sig, detected_sig_count)
+          end
+          unless event.get(@targetnote).nil?
+            if event.get(@targetnote) < detected_sig_note
+              event.set(@targetnote, detected_sig_note)
+            end
+          else
+            event.set(@targetnote, detected_sig_note)
+          end
+          unless event.get(@targetname_sig).nil?
+            event.set(@targetname_sig, event.get(@targetname_sig) + detected_sig_name)
+          else
+            event.set(@targetname_sig, detected_sig_name)
+          end
+          unless event.get(@targetid).nil?
+            event.set(@targetid, event.get(@targetid) + detected_sig_id)
+          else
+            event.set(@targetid, detected_sig_id)
+          end
+        end
+        #@logger.warn("Dectected SIG", :detected_sig_name => detected_sig_name)
+      end
+    end
+    ######################
+
+    ######REFERENCE#######
+    #check refresh db ref
+    unless @disable_ref
+      if @next_refresh_confrules < tnow
+        if @load_statut_rules == true
+          @load_statut_rules = false
+          load_db_ref
+          @next_refresh_confrules = tnow + @refresh_interval_confrules
+          @load_statut_rules = true
+        end
+      end
+      sleep(1) until @load_statut_rules
+    end
+    #check if db and rule not empty 
+    if not @ref_rules.empty? and not @ref_db.empty? and not @pattern_db and not @disable_ref and event.get(@noapply_ref).nil? and event.get(@field_enr).nil?
+      #list all rules
+      #!!!! amelioration de la sig avec simhash...
+      detected_ref = Array.new
+      detected_ref_field = Array.new
+      detected_ref_id = Array.new
+      detected_ref_err_count = 0
+      detected_ref_note = 0
+      eventK = event.to_hash.keys
+      for r_rule in @ref_rules
+        #rules[ {"pivot_field":{field1:'value'},{field2:'value'}, "list_sig": [fieldx,fieldy,...], "relation_min": 10, "simhash_size": 16, "simhash_use_size": 14, "id": 200X} ]
+        # if pivot containt array, !!! order is important
+        # list_sig containt field possible, if one field not exist, it works too
+        num_p = r_rule["pivot_field"].keys.length
+        pivot = r_rule["pivot_field"].keys & eventK
+        tmp_detect={}
+        tmp_detect[r_rule["id"].to_s]={}
+        #heck if pivot present in event
+        if num_p == pivot.length
+            stop = false
+            for keyx in pivot
+              if event.get(keyx) === r_rule["pivot_field"][keyx]
+                stop = true
+                break
+              end
+            end
+            next if stop
+            if @ref_db[r_rule["id"].to_s]
+            #{ 'ID20XXXX': {
+            #                                                                      'field': {
+            #                                                                                 'TYPE': 'Array|Int|String|...',
+            #                                                                                 'Uniq_value': true or false, #define if value is random => true
+            #                                                                                 'NOTE_UNIQ_REDUC': 0.1 # for reduce note if match on uniq fueld            
+            #                                                                                 'LIST_VALUE': ['value_possible1','value_possible2','value_possibleX'],
+            #                                                                                 'NOTE_LISTV': 0.25 # note between 0.x and 4 default 0.25
+            #                                                                                 'ENCODING': true or false, # value contains than ascii caratere
+            #                                                                                 'NOTE_ENCODING': 0.25 # note between 0.x and 4 default 0.25
+            #                                                                                 'LEN_MAX': numeric_value,
+            #                                                                                 'NOTE_LEN': 0.25 # note between 0.x and 4 default 0.25
+            #                                                                                 'LEN_MIN': numeric_value,
+            #                                                                                 'LEN_AVG': numeric_value,
+            #                                                                                 'LEN_AVG_PRCT': pourcent for AVG,
+            #                                                                                 'NOTE_LEN_AVG': 0.1 # note between 0.x and 4 default 0.1
+            #                                                                                 'LEN_EVENorUNEVENnum': numeric_value, #even num = 1;uneven num = 2; unknown/undefine = 0
+            #                                                                                 'NOTE_LEN_EVEN': 0.25 # note between 0.x and 4 default 0.25
+            #                                                                                 'REGEXP_MIN': [],
+            #                                                                                 'NOTE_REGEXP_MIN': 0.25 # note between 0.x and 4 default 0.25
+            #                                                                                 'REGEXP': []
+            #                                                                                 'NOTE_REGEXP': 0.25 # note between 0.x and 4 default 0.25
+            #                                                                               } ,
+            #                                                                      #relation value_fix contains list of value of field not unique (random)
+            #                                                                      # by exemple fld1: '1'; fld2: 'blabla';fld3: '10.10.10.10'
+            #                                                                      # create LIST simhash value and attention to order field
+            #                                                                      # you can optimiz with simhash - end if earn place memory
+            #                                                                      # important you count SIMHASH:COUNT for use COUNT if very little score => suspect [use conf -> relation_min]
+            #                                                                      'relation_value_fix": {'SIMHASH1':COUNTX,'SIMHASH2':COUNTY,'SIMHASH3':COUNTX},
+            #                                                                      'NOTE_DEFAULT': 2# note between 0.x and 4 default 2
+            # !!!!!!!!!!!!!!! if NOTE or relation_value_fix is name of real field == problem!!!!
+            #                                                                      }}}
+            #create sig event
+            sig_tmp = r_rule["list_sig"] & eventK
+            if sig_tmp.any?
+              #sif is not empty
+              #CHECK FIELD by FIELD
+              sig_not_uniq = []
+              for field in sig_tmp
+                tmp_detect[r_rule["id"].to_s][field.to_s]={}
+                string_field = true
+                #CHECK: TYPE -> int/string/array/hash/... not for note, juste for next step for good choice => nummber or string analysis
+                if ['boolean', 'long', 'integer', 'short', 'byte', 'double', 'float'].include?(@ref_db[r_rule["id"].to_s][field]['TYPE'].to_s)
+                  string_field = false
+                end
+                #CHECK: LIST_VALUE is not empty then check if contains
+                if not @ref_db[r_rule["id"].to_s][field]['LIST_VALUE'].empty? and not @ref_db[r_rule["id"].to_s][field]['LIST_VALUE'].include?(event.get(field.to_s))
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_LISTV']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['LIST_VALUE']="Value not in list: " + event.get(field.to_s)
+                end
+                #CHECK: ENCODING char, not check if not string
+                if string_field and not @ref_db[r_rule["id"].to_s][field]['ENCODING'].include?(event.get(field.to_s).encoding.to_s)
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_ENCODING']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['ENCODING']=event.get(field.to_s).encoding.to_s
+                end
+                #CHECK: TYPE class of number, not check for string
+                if not string_field and not @ref_db[r_rule["id"].to_s][field]['ENCODING'].include?(event.get(field.to_s).class.to_s)
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_ENCODING']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['ENCODING']=event.get(field.to_s).encoding.to_s
+                end
+                #CHECK: LEN for compare to MAX/MIN/AVG
+                f_len=0
+                #DIfferent check if field type string or number
+                if string_field
+                  f_len=event.get(field.to_s).length
+                else
+                  f_len=event.get(field.to_s)
+                end
+                prct_h = @ref_db[r_rule["id"].to_s][field]['LEN_AVG'].to_f + ( @ref_db[r_rule["id"].to_s][field]['LEN_AVG'].to_f / 100.to_f * @ref_db[r_rule["id"].to_s][field]['LEN_AVG_PRCT'].to_f )
+                prct_l = @ref_db[r_rule["id"].to_s][field]['LEN_AVG'].to_f - ( @ref_db[r_rule["id"].to_s][field]['LEN_AVG'].to_f / 100.to_f * @ref_db[r_rule["id"].to_s][field]['LEN_AVG_PRCT'].to_f )
+                if f_len > @ref_db[r_rule["id"].to_s][field]['LEN_MAX'] or f_len < @ref_db[r_rule["id"].to_s][field]['LEN_MIN'] or (prct_l >= f_len.to_f and f_len.to_f <= prct_h)
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_LEN']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['LEN']=f_len
+                end
+                #CHECK: type number (unven/uneven) if value different of 0
+                f_len_even = 2
+                if f_len.even?
+                 f_len_even = 1
+                end
+                if @ref_db[r_rule["id"].to_s][field]['LEN_EVENorUNEVENnum'] != 0 and f_len_even != @ref_db[r_rule["id"].to_s][field]['LEN_EVENorUNEVENnum']
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_LEN_EVEN']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['LEN_EVEN']=f_len_even
+                end
+                #CHECK: Regexp pattern Normaly/MInimal
+                #create regexp list match of field
+                rlist = []
+                @pattern_db.each do |key, value|
+                  match = Regexp.new(value, nil, 'n').match(event.get(field.to_s).to_s)
+                  if not match.nil?
+                    rlist << key
+                  end
+                end
+                #intersection with reference
+                regexp_min = @ref_db[r_rule["id"].to_s][field]['REGEXP_MIN'] & rlist
+                #if all reference not present in event
+                if regexp_min.length != @ref_db[r_rule["id"].to_s][field]['REGEXP_MIN'].length
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_REGEXP_MIN']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['REGEXP_MIN']=regexp_min - rlist
+                end
+                #create regexp sig
+                srlist=rlist.join("::")
+                #Search regexp sig in reference
+                unless @ref_db[r_rule["id"].to_s][field]['REGEXP'].include?(srlist)
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE_REGEXP']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['REGEXP']=srlist
+                end
+                #CHECK: Unique Value -> create SIG UNIQ
+                unless @ref_db[r_rule["id"].to_s][field]['Uniq_value']
+                  sig_not_uniq << field.to_s
+                end
+              end
+              #CHECK: GLOBAL relation of uniq field by simhash for PIVOT->SIG
+              #create simhash of sig_not_uniq value
+              sig_not_uniq = sig_not_uniq.sort
+              sig_not_uniq_value = []
+              for xfield in sig_not_uniq
+                sig_not_uniq_value << event.get(xfield.to_s)
+              end
+              #create simhash
+              sig_not_uniq_value = sig_not_uniq_value.to_s.force_encoding('iso-8859-1').encode('utf-8') #string
+              simhash_event = sig_not_uniq_value.simhash(:hashbits => r_rule["simhash_size"]).to_s
+              if @ref_db[r_rule["id"].to_s]['relation_value_fix'].key?(simhash_event)
+                #present , verify count
+                if @ref_db[r_rule["id"].to_s]['relation_value_fix'][simhash_event] < r_rule["relation_min"]
+                  # more less than count_min
+                  detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE']
+                  detected_ref_err_count = detected_ref_err_count + 1
+                  detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                  detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                  tmp_detect[r_rule["id"].to_s][field.to_s]['RELATION_LOW']=simhash_event
+                end
+              else
+                # not present
+                detected_ref_note = detected_ref_note + @ref_db[r_rule["id"].to_s][field]['NOTE']
+                detected_ref_err_count = detected_ref_err_count + 1
+                detected_ref_id.push(*r_rule["id"]) if not detected_ref_id.include?(r_rule["id"])
+                detected_ref_field.push(*field.to_s) if not detected_ref_field.include?(field.to_s)
+                tmp_detect[r_rule["id"].to_s][field.to_s]['RELATION']=simhash_event
+              end
+              detected_ref.push(*tmp_detect)
+            end
+          end
+        end
+        if @ref_stop_after_firstffind and detected_ref_err_count > 0
+          break
+        end
+      end
+      #add detected to event
+      if detected_ref.any? and detected_ref_err_count > 0
+        unless event.get(@target_ref).nil?
+          event.set(@target_ref, event.get(@target_ref) + detected_ref)
+        else
+          event.set(@target_ref, detected_ref)
+        end
+        unless event.get(@targetnum_ref).nil?
+          event.set(@targetnum_ref, event.get(@targetnum_ref) + detected_ref_err_count)
+        else
+          event.set(@targetnum_ref, detected_ref_err_count)
+        end
+        detected_ref_note = ( detected_ref_note + @ref_aroundfloat ).to_i #around float to int -- default + 0.5
+        if detected_ref_note > 4
+          detected_ref_note = 4
+        end
+        unless event.get(@targetnote).nil?
+          if event.get(@targetnote) < detected_ref_note
+            event.set(@targetnote, detected_ref_note)
+          end
+        else
+          event.set(@targetnote, detected_ref_note)
+        end
+        unless event.get(@targetname_ref).nil?
+          event.set(@targetname_ref, event.get(@targetname_ref) + detected_ref_field)
+        else
+          event.set(@targetname_ref, detected_ref_field)
+        end
+        unless event.get(@targetid).nil?
+          event.set(@targetid, event.get(@targetid) + detected_ref_id)
+        else
+          event.set(@targetid, detected_ref_id)
+        end
+        #@logger.warn("Dectected SIG", :detected_sig_name => detected_sig_name)
+      end
+    end
+    ######################
+    
+    ######## NOTE ########
+    #check refresh db note
+    if not event.get(@targetid).nil? and not @disable_note
+      if @next_refresh_note < tnow
+        if @load_statut_note == true
+          @load_statut_note = false
+          load_conf_rules_note
+          @next_refresh_note = tnow + @refresh_interval_confrules
+          @load_statut_note = true
+        end
+      end
+      sleep(1) until @load_statut_note
+    end
+    #check if db note empty and @targetid in event exist
+    if not @note_db.empty? and not event.get(@targetid).nil? and not @disable_note and event.get(@field_enr).nil?
+      note_max=0
+      overwrite=false
+      #check all rules
+      for r_note in @note_db
+        #check note
+        if r_note['id'] #id must present
+          if r_note['id'].is_a?(Array) #id must be type Array
+            verif=r_note['id'].length
+            #create intersection with event id and id present in rule
+            intersec = event.get(@targetid) & r_note['id'] 
+            #verify all id present in event
+            if not intersec.length == verif
+              next
+            end
+          end
+          #check if option id present in rule
+          if not r_note['optid'].nil? and not r_note['opt_num'].nil? #id find with opt_num present
+            intersec = event.get(@targetid) & r_note['optid'] #create intersection
+            #verify minimum X (@opt_num) present in event
+            if not intersec.length >= r_note['opt_num'].to_i
+              next
+            end
+          end
+          #check if not id present option in rule
+          if r_note['noid'].is_a?(Array) and not r_note['noid'].empty?
+            intersec = event.get(@targetid) & r_note['noid'] #create intersection
+            #verify none id present in event
+            if not intersec.length == 0
+              next
+            end
+          end
+          #change note if upper
+          if note_max < r_note['note']
+            note_max = r_note['note']
+            # if option overwrite, change note even if note lower
+            if r_note['overwrite']
+              overwrite=true
+            end
+          end
+        end
+      end
+      if note_max != 0 
+        if ( event.get(@targetnote) > note_max and overwrite ) or ( event.get(@targetnote) < note_max )
+          event.set(@targetnote, note_max)
+        end
+      end
+    end
+    ######################
+    
+    ######FINGERPRINT USE & DROP END######
+    # create fingerprint at end because, you need to have sig & ioc detected for unique event
+    #refresh db & conf fingerprint
+    unless @disable_fp
+      if @next_refresh_conffp < tnow
+        if @load_statut_fp == true
+          @load_statut_fp = false
+          load_conf_fp
+          load_db_dropfp
+          @next_refresh_conffp = tnow + @refresh_interval_conffp
+          @load_statut_fp = true
+        end
+      end
+      sleep(1) until @load_statut_fp
+    end
+    #chekc if db &conf are not empty + select_fp exist
+    if not @fp_rules.empty? and not @fp_db.nil? and not event.get(@select_fp).nil? and not @disable_fp and event.get(@field_enr).nil?
+      to_string = ""
+      if event.get(@select_fp).is_a?(Array)
+        for elemsfp in event.get(@select_fp)
+          #check if rules match with select_fp (case: Array)
+          if @fp_rules.key?(elemsfp.to_s)
+            if @fp_rules[elemsfp.to_s]['fields'].is_a?(Array) and @fp_rules[elemsfp.to_s]['hashbit'].is_a?(Numeric)
+              #create fingerprint
+              @fp_rules[elemsfp.to_s]['fields'].sort.each do |k|
+                if event.get(k)
+                  to_string << "|#{k}|#{event.get(k)}"
+                end
+              end
+              to_string << "|"
+              to_string = to_string.force_encoding('iso-8859-1').encode('utf-8') #string
+              event.set(@target_fp, to_string.simhash(:hashbits => @fp_rules[elemsfp.to_s]['hashbit']).to_s)
+              #check db fp drop
+              if event.get(@noapply_sig_dropfp).nil? and @fp_db[event.get(@target_fp)]
+                event.cancel
+                return
+              end
+              if @fingerprint_db[event.get(@target_fp)]
+                #key existe -- event known
+                if @fingerprint_db[event.get(@target_fp)] < tnow
+                  #date is passed
+                  @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[elemsfp.to_s]['delay']
+                  #(event[@target_tag_fp] ||= []) << @tag_name_first
+                  event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
+                  event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_first)
+                else
+                  #add tag
+                  #(event.get(@target_tag_fp) ||= []) << @tag_name_after
+                  event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
+                  event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_after)
+                end
+              else
+                #key not exist -- new event
+                @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[elemsfp.to_s]['delay']
+                #(event[@target_tag_fp] ||= []) << @tag_name_first
+                event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
+                event.set(@target_tag_fp, event.get(@target_tag_fp) + @tag_name_first)
+              end
+            end
+            break
+          end
+        end
+      #check if rules match with select_fp (case String)
+      elsif event.get(@select_fp).is_a?(String) and @fp_rules.key?(event.get(@select_fp))
+        if @fp_rules[event.get(@select_fp)]['fields'].is_a?(Array) and @fp_rules[event.get(@select_fp)]['hashbit'].is_a?(Integer)
+          #create fingerprint
+          @fp_rules[event.get(@select_fp)]['fields'].sort.each do |k|
+            if event.get(k)
+              to_string << "|#{k}|#{event.get(k)}"
+            end
+          end
+          to_string << "|"
+          to_string = to_string.force_encoding('iso-8859-1').encode('utf-8') #string
+          event.set(@target_fp, to_string.simhash(:hashbits => @fp_rules[event.get(@select_fp)]['hashbit']).to_s)
+          #check db fp drop
+          if event.get(@noapply_sig_dropfp).nil? and @fp_db[event.get(@target_fp)]
+            event.cancel
+            return
+          end
+          if @fingerprint_db[event.get(@target_fp)]
+            #key existe -- event known
+            if @fingerprint_db[event.get(@target_fp)] < tnow
+              #date is passed
+              @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[event.get(@select_fp)]['delay']
+              #(event[@target_tag_fp] ||= []) << @tag_name_first
+              event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
+              event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_first])
+            else
+              #add tag
+              #(event[@target_tag_fp] ||= []) << @tag_name_after
+              event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
+              event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_after])
+            end
+          else
+            #key not exist -- new event
+            @fingerprint_db[event.get(@target_fp)] = tnow + @fp_rules[event.get(@select_fp)]['delay']
+            #(event[@target_tag_fp] ||= []) << @tag_name_first
+            event.set(@target_tag_fp, []) unless event.get(@target_tag_fp)
+            event.set(@target_tag_fp, event.get(@target_tag_fp) + [@tag_name_first])
+          end
+        end
+      end
+    end
+    ###########################
+    
+    ######## FREQ EVENT ########
+    #rules_freq = [ {'select_field': {'fieldx':[value_list],'fieldy':[value_list]}, 'note': X, 'refresh_time': Xseconds,'reset_time': Xseconds[1j], 'reset_hour': '00:00:00', 'wait_after_reset': 10, 'id': 30XXX},...]
+    #TODO: CREATE TEMPLATE FOR NEW MESSAGE
+    #select field for select => first filter
+    #select field value => second filter
+    #refresh_time for check and calculate all time result: max & variation
+    # note if match
+    # reset time in second for reset all counter value
+    # reset hour for begin reset with hour => use for 24h reset begin at 00:00
+    # wait_after_reset: dont't check before 10 times values
+    #db_freq = { '30XXX': {'status_acces':true,'reset_time': date,'refresh_date': date, 'old_date': date,'num_time': Xtimes, 'V_prev': x/m, 'Varia_avg': z/m, 'count_prev': Xtimes, 'count_cour': Xtimes, 'V_max': x/m, 'Varia_max': x/m, 'Varia_min': +/- x/m, 'Varia_glob': x/m}}
+    #check refresh db ref
+    #
+    unless @disable_freq
+      if @next_refresh_freqrules < tnow
+        if @load_statut_freqrules == true
+          @load_statut_freqrules = false
+          load_rules_freq # load rules and create db_freq with init var 
+          @next_refresh_freqrules = tnow + @refresh_interval_freqrules
+          @load_statut_freqrules = true
+        end
+      end
+      sleep(1) until @load_statut_freqrules
+    end
+    #verify db & rules is not empty
+    if not @freq_rules.empty? and not @db_freq.empty? and not @disable_freq and event.get(@noapply_freq).nil? #and event.get(@field_enr).nil?
+      eventK = event.to_hash.keys
+      #CHECK RULE BY RULE
+      no_match = true
+      for f_rule in @freq_rules
+        f_rule.each do |fkey,fval|
+          #VERIFY FIELD by FIELD if present and value match
+          no_match = true
+          if not event.get(fkey.to_s).nil? and fval.include?(event.get(fkey.to_s))
+            no_match = false
+          end
+          break if no_match
+        end
+        # if rule no match then next
+        next if no_match
+        # if rule match increment count
+        if @db_freq[f_rule['id']]
+          #incrimente count
+          @db_freq[f_rule['id']]['count_cour'] = @db_freq[f_rule['id']]['count_cour'] + 1
+          #check if time to calculate varia & freq
+          #check if first time to check
+          if ( @db_freq[f_rule['id']]['num_time'] == 0 and @db_freq[f_rule['id']]['status_acces'] == true ) or ( @db_freq[f_rule['id']]['reset_time'] <= tnow and @db_freq[f_rule['id']]['status_acces'] == true )
+            #first time
+            @db_freq[f_rule['id']]['status_acces'] = false
+            #init old_date & refresh date
+            @db_freq[f_rule['id']]['reset_time'] = tnow + f_rule['reset_time']
+            @db_freq[f_rule['id']]['old_date'] = tnow
+            @db_freq[f_rule['id']]['refresh_date'] = tnow + f_rule['refresh_time']
+            @db_freq[f_rule['id']]['count_prev'] = @db_freq[f_rule['id']]['count_cour']
+            @db_freq[f_rule['id']]['status_acces']['v_max']=0
+            @db_freq[f_rule['id']]['status_acces']['varia_min']=10000
+            @db_freq[f_rule['id']]['status_acces']['varia_max']=0
+            @db_freq[f_rule['id']]['v_prev'] = 1
+            @db_freq[f_rule['id']]['varia_glob'] = 0
+            @db_freq[f_rule['id']]['num_time'] = 1
+            @db_freq[f_rule['id']]['status_acces'] = true
+          elsif @db_freq[f_rule['id']]['num_time'] != 0  
+            if @db_freq[f_rule['id']]['refresh_date'] <= tnow and @db_freq[f_rule['id']]['status_acces'] == true
+              @db_freq[f_rule['id']]['status_acces'] = false
+              #time to re-calculate
+              # put all in same unit => 60s
+              #calculate diff between ald date and new date
+              diff_time = tnow - @db_freq[f_rule['id']]['old_date'] #in seconds
+              #reinit old_date & refresh date
+              @db_freq[f_rule['id']]['old_date'] = tnow
+              @db_freq[f_rule['id']]['refresh_date'] = tnow + f_rule['refresh_time']
+              #calculate diff between previous count and count courant
+              count_diff = @db_freq[f_rule['id']]['count_cour'] - @db_freq[f_rule['id']]['count_prev']
+              #reinit count_previous
+              @db_freq[f_rule['id']]['count_prev'] = @db_freq[f_rule['id']]['count_cour']
+              #calculate v
+              v_cour = (((count_diff / diff_time)*60)+0.5).to_i # vcour/60s to interger
+              #check v_max
+              if @db_freq[f_rule['id']]['v_max'] < v_cour
+                @db_freq[f_rule['id']]['v_max'] = v_cour
+                #CREATE ALERT
+              end
+              #cacl varia
+              varia_cour = v_cour - db_freq[f_rule['id']]['v_prev']
+              #reinit v_prev
+              db_freq[f_rule['id']]['v_prev'] = v_cour
+              #incriment varia_glob
+              db_freq[f_rule['id']]['varia_glob'] = db_freq[f_rule['id']]['varia_glob'] + varia_cour.abs
+              #check varia_max & varia_min
+              if @db_freq[f_rule['id']]['varia_max'] < varia_cour
+                #CREATE ALERT
+                if f_rule['wait_after_reset'] < @db_freq[f_rule['id']]['num_time']
+                  new_event = LogStash::Event.new
+                  new_event.set("message", "ALERT FREQ -- rule id:" + f_rule['id'].to_s + " -- count " + v_cour.to_s + "events for 60s -- VARIA : " + varia_cour.to_s + "(varia courant) -- The value change old varia max: " + @db_freq[f_rule['id']]['varia_max'])
+                  new_event.set("type", "alert_freq")
+                  new_event.set("ruleid", f_rule['id'].to_s)
+                  new_event.set("time", tnow.to_s)
+                end
+                @db_freq[f_rule['id']]['varia_max'] = varia_cour
+              end
+              if @db_freq[f_rule['id']]['varia_min'] > varia_cour
+                #CREATE ALERT
+                if f_rule['wait_after_reset'] < @db_freq[f_rule['id']]['num_time']
+                  new_event = LogStash::Event.new
+                  new_event.set("message", "ALERT FREQ -- rule id:" + f_rule['id'].to_s + " -- count " + v_cour.to_s + "events for 60s -- VARIA : " + varia_cour.to_s + "(varia courant) -- The value change old varia min: " + @db_freq[f_rule['id']]['varia_min'])
+                  new_event.set("type", "alert_freq")
+                  new_event.set("ruleid", f_rule['id'].to_s)
+                  new_event.set("time", tnow.to_s)
+                end
+                db_freq[f_rule['id']]['varia_min'] = varia_cour
+              end
+              #calculate varia_avg
+              @db_freq[f_rule['id']]['varia_avg'] = db_freq[f_rule['id']]['varia_glob'] / @db_freq[f_rule['id']]['num_time']
+              #incremente num time of calculate
+              @db_freq[f_rule['id']]['num_time'] = @db_freq[f_rule['id']]['num_time'] + 1
+              #check if varia is more than v_cour
+              if varia_cour > @db_freq[f_rule['id']]['varia_avg']
+                #CREATE ALERT
+                if f_rule['wait_after_reset'] < @db_freq[f_rule['id']]['num_time']
+                  new_event = LogStash::Event.new
+                  new_event.set("message", "ALERT FREQ -- rule id:" + f_rule['id'].to_s + " -- count " + v_cour.to_s + "events for 60s -- VARIA morest : " + varia_cour.to_s + "(varia courant) > " + @db_freq[f_rule['id']]['varia_avg'].to_s + "(varia global)")
+                  new_event.set("type", "alert_freq")
+                  new_event.set("ruleid", f_rule['id'].to_s)
+                  new_event.set("time", tnow.to_s)
+                end
+              end
+              @db_freq[f_rule['id']]['status_acces'] = true
+            end
+          end
+        end
+      end
+    end
+    ##### NOT CREATE ALERTE ON EVENT BECAUSE EVENT MAYBE NOT ORIGIN FREQ INCREASE ###
+    ######################
+                
+    filter_matched(event)
+  end
+  ########## LOAD/REFRESH/SAVE CONF & DB ################
+  private
+  def load_rules_freq
+    if !File.exists?(@conf_freq)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_freq)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_freq
+    if not tmp_hash == @hash_conf_freq
+      @hash_conf_freq = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_freq, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          if tmp_db['rules'].is_a?(Array)
+            @freq_rules = tmp_db['rules']
+            #CREATE DB with ID
+            for rulex in @freq_rules
+              if @db_freq[rulex['id']].nil?
+                @db_freq[rulex['id']]={}
+                @db_freq[rulex['id']]['num_time']=0
+                @db_freq[rulex['id']]['count_cour']=0
+                @db_freq[rulex['id']]['reset_time']=0
+                @db_freq[rulex['id']]['status_acces']=true
+              end
+            end
+          end
+        end
+        @logger.info("loading/refreshing REFERENCES conf rules")
+      rescue
+        @logger.error("JSON CONF SIG -- FREQ RULES-- PARSE ERROR")
+      end
+    end
+  end
+  def load_db_pattern
+    if !File.exists?(@db_pattern)
+      @logger.warn("DB file read failure, stop loading", :path => @db_pattern)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @db_pattern
+    if not tmp_hash == @hash_dbpattern
+      @hash_dbpattern = tmp_hash
+      File.readlines(@db_pattern).each do |line|
+        elem1, elem2 = line.split(/=>>/)
+        elem2.delete!("\n")
+        @pattern_db[elem1] = elem2
+      end
+    end
+  end
+  def load_db_ref
+    if !File.exists?(@db_ref)
+      @logger.warn("DB file read failure, stop loading", :path => @db_ref)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @db_ref
+    if not tmp_hash == @hash_dbref
+      @hash_dbref = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@db_ref, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          @ref_db = tmp_db
+        end
+        @logger.info("loading/refreshing REFERENCES DB")
+      rescue
+      end
+    end
+    #CONF    
+    if !File.exists?(@conf_ref)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_ref)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_ref
+    if not tmp_hash == @hash_conf_ref
+      @hash_conf_ref = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_ref, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          unless tmp_db['rules'].nil?
+            if tmp_db['rules'].is_a?(Array)
+              @ref_rules= tmp_db['rules']
+            end
+          end
+        end
+        @logger.info("loading/refreshing REFERENCES conf rules")
+      rescue
+        @logger.error("JSON CONF SIG -- DB REF -- PARSE ERROR")
+      end
+    end
+  end
+  def load_conf_bl
+    #load file
+    for f in @file_bl
+      if !File.exists?(f)
+        @logger.warn("DB file read failure, stop loading", :path => f)
+        exit -1
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read f
+      if @hash_dbbl[f]
+        if not tmp_hash == @hash_dbioc[f]
+          #change
+          @bl_db[File.basename(f)].clear
+          @hash_dbbl[f] = tmp_hash
+          File.readlines(f).each do |line|
+            line=line.strip
+            ip = ""
+            @bl_db[File.basename(f)].push(ip) if ip = IPAddr.new(line) rescue false
+          end
+        end
+      else
+        #unknown
+        @bl_db[File.basename(f)] = []
+        @hash_dbbl[f] = tmp_hash
+        File.readlines(f).each do |line|
+          line=line.strip
+          ip = ""
+          @bl_db[File.basename(f)].push(ip) if ip = IPAddr.new(line) rescue false
+        end
+      end
+      @logger.info("loading/refreshing DB BL REPUTATION file(s): #{File.basename(f)}")
+    end
+    #load conf
+    if !File.exists?(@conf_bl)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_bl)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_bl
+    if not tmp_hash == @hash_conf_bl
+      @hash_conf_bl = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_bl, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          #{fieldx: {dbs: [file_name,...], catergory: , note: X, id: X}}
+          #verify dbs filename exist
+          tmp_db.each do |fkey,fval|
+            if fval['dbs'].is_a?(Array)
+              for fn in fval['dbs']
+                if @bl_db[fn].nil?
+                  @logger.error("You use a file name not exist in conf BL REPUTATION!!!")
+                  exit -1
+                end
+              end
+            else
+              @logger.error("DBS field not exist in JSON conf BL REPUTATION!!")
+              exit -1
+            end
+          end
+          @bl_rules = tmp_db
+        end
+        @logger.info("loading/refreshing Conf BL REPUTATION #{@bl_db}")
+      rescue
+        @logger.error("JSON CONF SIG -- CONF BL -- PARSE ERROR")
+      end
+    end
+  end
+  def load_conf_rules_sig
+    if !File.exists?(@conf_rules_sig)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_rules_sig)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_rules_sig
+    if not tmp_hash == @hash_conf_rules_sig
+      @hash_conf_rules_sig = tmp_hash
+      begin
+        @sig_db = JSON.parse( IO.read(@conf_rules_sig, encoding:'utf-8') ) 
+        @sig_db_array.clear
+        @sig_db_array_false.clear
+        keyF = Array.new
+        keyT = Array.new
+        #order sig_db by type (1 or 2)
+        if @sig_db['rules'].is_a?(Array)
+          tmp = *@sig_db['rules']
+          j=0
+          (0..@sig_db['rules'].length-1).each do |i|
+            @sig_db['rules'][i]['rule_metadata'].each do |nkey,nval|
+              if nval['type'].is_a?(Numeric)
+                if nval['type'] == 2
+                  #puts 'find at'+i.to_s+' -> '+j.to_s+' -- '+tmp[i-j].to_s
+                  tmp=tmp.insert(-1,tmp.delete_at(i-j))
+                  j=j+1
+                  break
+                end
+              end
+            end
+          end
+          #create Field True & false
+          @sig_db['rules'] = *tmp
+          for rule in tmp
+            keyF.clear
+            keyT.clear
+            rule['rule_conditions'].each do |nkey,nval|
+              if nval.has_key?('false')
+                keyF.push(nkey)
+              else
+                keyT.push(nkey)
+              end
+            end
+            @sig_db_array.push([*keyT])
+            @sig_db_array_false.push([*keyF])
+            @sig_db_array_len=@sig_db_array.length-1
+          end
+          keyF.clear
+          keyT.clear
+                # News rules format
+      #{"rule_metadata": 
+      #  {"type":2,"note":2,"name":"Referer FIELD not present","id":4}, 
+      #  "rule_conditions": {
+      #         "type":[{"motif":["squid"], 'lid': 1},
+      #         "uri_proto":[{"notregexp":["tunnel"], 'lid': 2}],
+      #         "referer_host":[{"false":{}, 'lid': 3}]
+      #        }
+      #  "rule_expression": "(1 AND 2) OR 3"
+      #} 
+          #verifie LID uniq & expression contains just LID
+          (0..@sig_db['rules'].length-1).each do |i|
+            liduniq=[]
+            @sig_db['rules'][i]['rule_metadata']['parse']=true
+            @sig_db['rules'][i]['rule_conditions'].each do |nkey,nval|
+              #verify lid uniq
+              nval.each do |lidsx|
+                if liduniq.include? lidsx['lid']
+                  #error
+                  @sig_db['rules'][i]['rule_metadata']['parse']=false
+                  break
+                else
+                  liduniq.push(lidsx['lid'])
+                end
+              end
+            end
+            #verify expression
+            if @sig_db['rules'][i]['rule_metadata']['parse']
+              vexp=@sig_db['rules'][i]['rule_expression'].dup
+              vexp=vexp.gsub(/[\(\)ORANDNT]+/,'')
+              liduniq.each do |lidx|
+                cnt_exp1=vexp.length
+                vexp=vexp.gsub(/(^| )#{lidx.to_s}($| )/, '')
+                cnt_exp2=vexp.length
+                #verify use each LID
+                if cnt_exp1 == cnt_exp2
+                  @sig_db['rules'][i]['rule_metadata']['parse']=false
+                  break
+                end
+              end
+              vexp=vexp.gsub(/[\ ]+/,'')
+              #bad expression or use other LID not exist
+              if vexp
+                @sig_db['rules'][i]['rule_metadata']['parse']=false
+                next
+              end
+            end
+          end
+        end
+        @logger.info("loading/refreshing SIG conf rules")
+      rescue
+          @logger.error("JSON CONF SIG -- SIG RULES -- PARSE ERROR")
+      end
+    end
+  end
+  def load_conf_rules_note
+    if !File.exists?(@conf_rules_note)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_rules_note)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_rules_note
+    if not tmp_hash == @hash_conf_rules_note
+      @hash_conf_rules_note = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_rules_note, encoding:'utf-8') ) 
+        unless tmp_db.nil?
+          unless tmp_db['rules'].nil?
+            if tmp_db['rules'].is_a?(Array)
+              @note_db = tmp_db['rules']
+            end
+          end
+        end
+        @logger.info("loading/refreshing NOTE conf rules")
+      rescue
+          @logger.error("JSON CONF SIG -- NOTE/SCORE RULES -- PARSE ERROR")
+      end
+    end
+  end
+  def load_conf_ioc
+    if !File.exists?(@conf_ioc)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_ioc)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_ioc
+    if not tmp_hash == @hash_conf_ioc
+      @hash_conf_ioc = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_ioc, encoding:'utf-8') )
+        @ioc_rules = tmp_db
+        @logger.info("loading/refreshing IOC conf rules")
+      rescue
+          @logger.error("JSON CONF SIG -- IOC DB -- PARSE ERROR")
+      end
+    end
+  end
+  def load_db_ioc
+    #if one file change reload all file
+    change = false
+    @db_ioc.sort.each do |f|
+      if !File.exists?(f)
+        @logger.warn("DB file read failure, stop loading", :path => f)
+        exit -1
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read f
+      if @hash_dbioc[f]
+        if not tmp_hash == @hash_dbioc[f]
+         #load
+         @hash_dbioc[f] = tmp_hash
+         change = true
+        end
+      else
+        #load
+        @hash_dbioc[f] = tmp_hash
+        change = true
+      end
+    end
+    if change == true
+      @ioc_db = {}
+      @db_ioc.sort.each do |f|
+        begin
+          db_tmp = JSON.parse( IO.read(f, encoding:'utf-8') )
+          @ioc_db = @ioc_db.merge(db_tmp) {|key, first, second| first.is_a?(Array) && second.is_a?(Array) ? first | second : second }
+        rescue
+          @logger.error("JSON CONF SIG -- IOC DB -- PARSE ERROR")
+        end
+      end
+      @logger.info("loading/refreshing DB IOC file(s)")
+    end
+  end
+  def load_conf_nv 
+    if !File.exists?(@conf_nv)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_nv)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_nv
+    if not tmp_hash == @hash_conf_nv
+      @hash_conf_nv = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_nv, encoding:'utf-8') ) 
+        @nv_rules = tmp_db
+        if @nv_rules['rules']
+          for rule in @nv_rules['rules']
+            if not @nv_db[rule.to_s]
+              @nv_db[rule.to_s] = []
+            end
+          end
+        end
+        @logger.info("refreshing DB NewValue file")
+      rescue
+        @logger.error("JSON CONF SIG -- CONF NV -- PARSE ERROR")
+      end
+    end
+  end
+  def save_db_nv
+    begin
+      File.open(@db_nv,"w+") do |f|
+        f.write(JSON.pretty_generate(@nv_db))
+      end
+    rescue
+      @logger.error("JSON SAVE SIG -- SAVE NV-- PARSE/WRITE ERROR")
+    end
+  end
+  def save_db_ioclocal
+    begin
+      File.open(@file_save_localioc,"w+") do |f|
+        f.write(JSON.pretty_generate(@ioc_db_local))
+      end
+    rescue
+      @logger.error("JSON SAVE SIG -- SAVE IOC LOCAL -- PARSE/WRITE ERROR")
+    end
+  end
+  
+  def load_db_enr
+    if !File.exists?(@conf_enr)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_enr)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+    if not tmp_hash == @hash_conf_enr
+      @hash_conf_enr = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_enr, encoding:'utf-8') )
+        @db_enr = tmp_db
+        #open all db file
+        @db_enr.each do |ekey,eval|
+          ofile=eval["file"]
+          if !File.exists?(ofile)
+		    @logger.warn("DB file read failure, stop loading", :path => ofile)
+            exit -1
+          end
+          tmp_hash = Digest::SHA256.hexdigest File.read ofile
+          if not tmp_hash == @hash_dbfile_enr[ofile]
+            @hash_dbfile_enr[ofile] = tmp_hash
+            @db_enr[ekey]["db"] = JSON.parse( IO.read(ofile, encoding:'utf-8') )
+            sha1db=Digest::SHA1.hexdigest @db_enr[ekey]["db"].to_s
+            @hash_db_enr[ofile] = sha1db
+          end
+        end
+      rescue
+        @logger.error("JSON CONF SIG -- DB ENR -- PARSE ERROR")
+      end
+    end
+  end
+  def save_dbs_enr
+  #load db conf fp
+    @db_enr.each do |ekey,eval|
+      ofile=eval["file"]
+      if !File.exists?(ofile)
+	    @logger.warn("DB file read failure, stop loading", :path => ofile)
+        exit -1
+      end
+      tmp_sha1db = Digest::SHA1.hexdigest @db_enr[ekey]["db"].to_s
+      if not tmp_sha1db == @hash_db_enr[ofile]
+        File.open(ofile,"w+") do |f|
+          begin
+            f.write(JSON.pretty_generate(@db_enr[ekey]["db"]))
+          rescue
+            @logger.error("JSON SAVE SIG -- SAVE ENR -- PARSE/WRITE ERROR")
+          end
+        end
+        @hash_db_enr[ofile] = tmp_sha1db
+        tmp_hash = Digest::SHA256.hexdigest File.read ofile
+        @hash_dbfile_enr[ofile] = tmp_hash
+      end
+    end
+=begin
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+    if not tmp_hash == @hash_conf_enr
+      @hash_conf_enr = tmp_hash
+      db_enr_tmp = JSON.parse( IO.read(@conf_enr, encoding:'utf-8') )
+      #TODO verify if it works
+      @db_enr=@db_enr.deep_merge(db_enr_tmp)
+      File.open(@conf_enr,"w+") do |f|
+        f.write(JSON.pretty_generate(@db_enr))
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+      @hash_conf_enr = tmp_hash
+    else
+      File.open(@conf_enr,"w+") do |f|
+        f.write(JSON.pretty_generate(@db_enr))
+      end
+      tmp_hash = Digest::SHA256.hexdigest File.read @conf_enr
+      @hash_conf_enr = tmp_hash
+    end
+=end
+  end
+  
+  def load_conf_fp
+  #load db conf fp
+    if !File.exists?(@conf_fp)
+      @logger.warn("DB file read failure, stop loading", :path => @conf_fp)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @conf_fp
+    if not tmp_hash == @hash_conf_fp
+      @hash_conf_fp = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@conf_fp, encoding:'utf-8') )
+        @fp_rules = tmp_db
+      rescue
+        @logger.error("JSON CONF SIG -- CONF FP -- PARSE ERROR")
+      end
+    end
+  end
+  def load_db_dropfp
+    #load fp
+    if !File.exists?(@db_dropfp)
+      @logger.warn("DB file read failure, stop loading", :path => @db_dropfp)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @db_dropfp
+    if not tmp_hash == @hash_dropfp
+      @hash_dropfp = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@db_dropfp, encoding:'utf-8') )
+        @fp_db = tmp_db
+      rescue
+        @logger.error("JSON CONF SIG -- DROPFP -- PARSE ERROR")
+      end
+    end
+  end
+  def load_db_drop
+  #load drop db
+    if !File.exists?(@db_drop)
+      @logger.warn("DB file read failure, stop loading", :path => @db_drop)
+      exit -1
+    end
+    tmp_hash = Digest::SHA256.hexdigest File.read @db_drop
+    if not tmp_hash == @hash_dropdb
+      @hash_dropdb = tmp_hash
+      begin
+        tmp_db = JSON.parse( IO.read(@db_drop, encoding:'utf-8') )
+        @drop_db = tmp_db
+      rescue
+        @logger.error("JSON CONF SIG -- DROPDB -- PARSE ERROR")
+      end
+    end
+  end
+  #clean db special
+  def clean_db_sigfreq(date)
+    @sig_db_freq.each do |nkey,nval|
+      if nval[delay] < date
+        @sig_db_freq.delete(nkey)
+      end
+    end
+  end
+end
